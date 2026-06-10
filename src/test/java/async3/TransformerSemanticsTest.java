@@ -92,6 +92,15 @@ class TransformerSemanticsTest {
         assertEquals("v=7", invokeAsync(host, "initializedAcrossAwait", later(7)));
     }
 
+    /** A ref local dead after the first await: nulling its slot must not change semantics. */
+    @Test
+    void deadRef() throws Throwable {
+        assertEquals("15:7", invokeAsync(host, "deadRef", done(5), done(7)));
+        assertEquals("15:7", invokeAsync(host, "deadRef", later(5), later(7)));
+        assertEquals("15:7", invokeAsync(host, "deadRef", done(5), later(7)));
+        assertEquals("15:7", invokeAsync(host, "deadRef", later(5), done(7)));
+    }
+
     /** The original methods are untouched and still run as the blocking tier. */
     @Test
     void blockingTierStillWorks() throws Throwable {

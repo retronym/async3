@@ -60,16 +60,19 @@ public void apply(java.lang.Object);
      175: aload_0
      176: iconst_2
      177: putfield      #26   // state = 2
-     180: ...
      183: invokevirtual #41   // getCompleted — fast path: skip suspension if already done
      186: dup
      187: ifnonnull     221
-     190: ...                 // spill fa, fb, x into refs[]/prims[]
-     215: ...
+     190: ...
+     199: lastore             // spill x — the only live value here — into prims[2]
+     204: iconst_0
+     205: aconst_null
+     206: aastore             // fa and fb are dead past this point: null their ref slots, so
+     212: aconst_null         // the suspended frame pins nothing the resumed code can't read
+     213: aastore             // (liveness-driven, the analogue of scala-async's fieldsToNullOut)
      217: invokevirtual #45   // onComplete — park; resumes apply() when the future fires
      220: return
      221: astore_1            // resumption point: completed value lands here
-     222: ...
 ```
 
 The original `LocalVariableTable` is carried over and remapped, so a debugger sees source
@@ -96,13 +99,14 @@ transform emits per state):
 
 ```
 == 2. real suspension, resumed by manual completion on the main thread
-   Samples.sumTwice(...) suspended at state 1 (line 22): fa = CompletableFuture[Not completed, 1 dependents], fb = CompletableFuture[Not completed]
-   Samples.sumTwice(...) suspended at state 2 (line 23): fa = CompletableFuture[Completed normally], fb = CompletableFuture[Not completed, 1 dependents], x = 5
+   Samples.sumTwice(...) suspended at state 1 (line 22): fb = CompletableFuture[Not completed]
+   Samples.sumTwice(...) suspended at state 2 (line 23): x = 5
    result = s:10
 ```
 
-Note `x = 5` appearing once state 2 is reached: the spilled frame rendered under source
-names. The demo also dumps every generated class to `target/transformed-classes/` for
+The frame holds exactly what the resumed code can still read, under source names: at state 1
+only `fb` (`fa` was consumed by the first await and its slot is already nulled); at state 2
+only `x`. The demo also dumps every generated class to `target/transformed-classes/` for
 `javap -c -l -p` spelunking.
 
 ## The Java agent: the default deployment
@@ -121,13 +125,13 @@ private static void sumTwice$asyncBody(async3.runtime.FutureStateMachine, java.l
 
 public static java.util.concurrent.CompletableFuture sumTwice$async(CompletableFuture, CompletableFuture);
   Code:
-     0: new           #181  // class async3/runtime/DelegatingStateMachine
+     0: new           #194  // class async3/runtime/DelegatingStateMachine
      ...
-     8: ldc           #203  // MethodHandle REF_invokeStatic Samples.sumTwice$asyncBody:(LFutureStateMachine;Ljava/lang/Object;)V
-    10: ldc           #205  // String "state 1 (line 22): fa -> refs[0] ... state 2: ... x -> prims[2] (I)"
-    12: invokespecial #189  // DelegatingStateMachine.<init>
+     8: ldc           #216  // MethodHandle REF_invokeStatic Samples.sumTwice$asyncBody:(LFutureStateMachine;Ljava/lang/Object;)V
+    10: ldc           #218  // String "state 1 (line 22): fb -> refs[1] ... state 2 (line 23): x -> prims[2] (I)"
+    12: invokespecial #202  // DelegatingStateMachine.<init>
     ...
-    31: invokevirtual #193  // start
+    31: invokevirtual #206  // start
 ```
 
 Consequences: private access is same-class access (no nestmate machinery), and — the
@@ -222,7 +226,9 @@ scheduler needs to see rather than block on.
 — the case the tree-level ANF transform exists to forbid); loops; try/catch (failed futures
 reach the user's handler); two-slot primitives; `new Foo(await(f))` via Kotlin-style
 NEW-sinking (nested/conditional/statement shapes); instance methods (`this` is just entry
-local 0; the state machine joins the host's nest for private access); per-state `$asyncDebug`
+local 0; the state machine joins the host's nest for private access); liveness-driven nulling
+of dead ref slots (a suspended frame pins only what the resumed code can still read — the
+analogue of scala-async's `fieldsToNullOut`); per-state `$asyncDebug`
 frame metadata; `AsyncDebug.describe`; LVT/line-number carry-over; the agent, the
 `async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging.
 52 tests, including a semantic matrix running every sample blocking vs. transformed, fast
@@ -233,7 +239,9 @@ constructors.
 
 ## Future work
 
-- **Liveness-based spilling** — currently all assigned locals are spilled, not just live ones.
+- **Spill-store elision** — dead ref slots are already nulled rather than spilled; the
+  remaining (purely throughput) refinement is skipping the stores and restores for dead prim
+  slots too. Measure with the JMH work below before bothering.
 - **The lazy tier switch** — `invokedynamic`/`MutableCallSite` dispatch that starts on the
   blocking tier and flips to the transformed version when profiling says hot-and-blocking
   (design doc [§7](docs/DESIGN.md#7-the-runtime-deferred-tiered-variant)); the agent already

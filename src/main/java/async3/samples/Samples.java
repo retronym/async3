@@ -80,4 +80,16 @@ public class Samples {
         int x = AsyncRT.await(f);
         return sb.append(x).toString();
     }
+
+    /**
+     * A ref local ({@code big}) live across the first await but dead after it: while suspended
+     * at the second await, its frame slot (and those of the consumed parameters) must be null
+     * rather than pinning the value for the suspension's duration.
+     */
+    public static String deadRef(CompletableFuture<Integer> f, CompletableFuture<Integer> g) {
+        String big = "x".repeat(10);
+        int a = AsyncRT.await(f) + big.length();
+        int b = AsyncRT.await(g);
+        return a + ":" + b;
+    }
 }

@@ -9,6 +9,7 @@ import org.objectweb.asm.tree.*;
 import org.objectweb.asm.tree.analysis.*;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -52,8 +53,13 @@ import static org.objectweb.asm.Opcodes.*;
  * (Observable difference: the class-initialization side effect of {@code NEW} moves after the
  * evaluation of the constructor arguments; Kotlin accepts the same.)
  *
- * <p>Current limitations (deliberate, see docs/DESIGN.md): static methods only; rejects
- * suspension while a monitor is held; spills all assigned locals rather than only live ones.
+ * <p>Spilling is liveness-aware for references: dead ref locals are not spilled and every ref
+ * frame slot not written at a suspension point is nulled ({@link Liveness}, the bytecode
+ * analogue of the tree transform's fieldsToNullOut), so a suspended frame never pins values
+ * the resumed code cannot read. Primitives are spilled regardless (no pinning concern).
+ *
+ * <p>Current limitations (deliberate, see docs/DESIGN.md): rejects suspension while a monitor
+ * is held; await in constructors is rejected.
  */
 public final class AsyncTransformer {
 
@@ -474,6 +480,12 @@ public final class AsyncTransformer {
         for (AbstractInsnNode insn : mn.instructions) if (isAwait(insn)) awaits.add(insn);
         int n = awaits.size();
 
+        // Liveness drives the nulling of dead ref slots (the bytecode analogue of the tree
+        // transform's fieldsToNullOut): a suspended frame must not pin values the resumed code
+        // can no longer read.
+        BitSet[] liveOut = Liveness.liveOut(mn);
+        BitSet refSlots = refFrameSlots(entry, mn, frames, awaits);
+
         Map<LabelNode, LabelNode> labelMap = new HashMap<>();
         for (AbstractInsnNode insn : mn.instructions)
             if (insn instanceof LabelNode l) labelMap.put(l, new LabelNode());
@@ -498,10 +510,12 @@ public final class AsyncTransformer {
                 body.add(new LineNumberNode(ln.line, labelMap.get(ln.start)));
             } else if (isAwait(insn)) {
                 state++;
-                Frame<BasicValue> f = frames[mn.instructions.indexOf(insn)];
+                int idx = mn.instructions.indexOf(insn);
+                Frame<BasicValue> f = frames[idx];
                 if (f == null) throw new IllegalStateException("unreachable await call");
-                body.add(awaitSite(state, f, mn.maxLocals, OFF, futTmp, scratch, resume[state]));
-                appendDebug(debug, mn, insn, state, f);
+                body.add(awaitSite(state, f, mn.maxLocals, OFF, futTmp, scratch, resume[state],
+                        liveOut[idx], refSlots));
+                appendDebug(debug, mn, insn, state, f, liveOut[idx]);
             } else if (insn.getOpcode() >= IRETURN && insn.getOpcode() <= RETURN) {
                 body.add(returnSite(returnType, scratch));
             } else {
@@ -578,9 +592,20 @@ public final class AsyncTransformer {
         return apply;
     }
 
-    /** The replacement for one await call instruction. On entry the stack is [below..., future]. */
+    /**
+     * The replacement for one await call instruction. On entry the stack is [below..., future].
+     *
+     * <p>{@code live} is the liveness at the await; {@code refSlots} is every ref frame slot the
+     * machine ever writes (entry spill or any await). Dead ref locals are not spilled, and any
+     * ref slot not written at this state is nulled, so a suspended frame holds exactly the
+     * references the resumed code can still read — stale values from earlier states (or from a
+     * frame slot whose variable has since died) don't pin garbage for the suspension's duration.
+     * The restore path is unchanged: a dead-but-in-scope ref local restores as null (which any
+     * CHECKCAST accepts), the same observable behavior as the tree transform's fieldsToNullOut.
+     */
     private static InsnList awaitSite(int state, Frame<BasicValue> f, int maxLocals,
-                                      int off, int futTmp, int scratch, LabelNode resumeLabel) {
+                                      int off, int futTmp, int scratch, LabelNode resumeLabel,
+                                      BitSet live, BitSet refSlots) {
         InsnList il = new InsnList();
         LabelNode fast = new LabelNode();
 
@@ -597,14 +622,21 @@ public final class AsyncTransformer {
         il.add(new JumpInsnNode(IFNONNULL, fast));
         il.add(new InsnNode(POP));
 
-        // park: spill assigned locals ...
+        // park: spill assigned locals (live ones, for refs) ...
+        BitSet written = new BitSet();
         for (int v = 0; v < maxLocals; v++) {
             BasicValue value = f.getLocal(v);
             requireInitialized(value);
             if (!isSpillable(value)) continue;
-            il.add(spillFromLocal(value.getType(), off + v, v));
+            Type t = value.getType();
+            if (isRef(t) && !isNullType(t)) {
+                if (!live.get(v)) continue; // dead ref: slot nulled below instead
+                written.set(v);
+            }
+            il.add(spillFromLocal(t, off + v, v));
         }
         // ... and the operand stack below the future, popped top-down via the scratch local
+        // (stack values are live by construction: the original code consumes them after resume)
         for (int j = f.getStackSize() - 2; j >= 0; j--) {
             BasicValue value = f.getStack(j);
             requireInitialized(value);
@@ -612,9 +644,19 @@ public final class AsyncTransformer {
             if (isNullType(t)) {
                 il.add(new InsnNode(POP));
             } else {
+                if (isRef(t)) written.set(maxLocals + j);
                 il.add(new VarInsnNode(t.getOpcode(ISTORE), scratch));
                 il.add(spillFromLocal(t, scratch, maxLocals + j));
             }
+        }
+        // null every ref slot not written at this state
+        for (int s = refSlots.nextSetBit(0); s >= 0; s = refSlots.nextSetBit(s + 1)) {
+            if (written.get(s)) continue;
+            il.add(new VarInsnNode(ALOAD, 0));
+            il.add(new FieldInsnNode(GETFIELD, FSM, "refs", "[Ljava/lang/Object;"));
+            il.add(pushInt(s));
+            il.add(new InsnNode(ACONST_NULL));
+            il.add(new InsnNode(AASTORE));
         }
         il.add(new VarInsnNode(ALOAD, 0));
         il.add(new VarInsnNode(ALOAD, futTmp));
@@ -632,6 +674,35 @@ public final class AsyncTransformer {
         // tryGet leaves the awaited value (as Object) on the stack; the original instructions
         // that followed the await (checkcast / unboxing) consume it unchanged.
         return il;
+    }
+
+    /**
+     * Every ref frame slot the machine ever writes: the entry locals spilled by the
+     * constructor/entry point, plus everything any await site can spill. The complement of a
+     * state's own writes within this set is what {@link #awaitSite} nulls.
+     */
+    private static BitSet refFrameSlots(Type[] entry, MethodNode mn, Frame<BasicValue>[] frames,
+                                        List<AbstractInsnNode> awaits) {
+        BitSet set = new BitSet();
+        int slot = 0;
+        for (Type t : entry) {
+            if (isRef(t)) set.set(slot);
+            slot += t.getSize();
+        }
+        for (AbstractInsnNode a : awaits) {
+            Frame<BasicValue> f = frames[mn.instructions.indexOf(a)];
+            if (f == null) continue;
+            for (int v = 0; v < mn.maxLocals; v++) {
+                BasicValue value = f.getLocal(v);
+                if (isSpillable(value) && isRef(value.getType()) && !isNullType(value.getType()))
+                    set.set(v);
+            }
+            for (int j = 0; j < f.getStackSize() - 1; j++) {
+                Type t = f.getStack(j).getType();
+                if (t != null && isRef(t) && !isNullType(t)) set.set(mn.maxLocals + j);
+            }
+        }
+        return set;
     }
 
     /** Replaces a return instruction: complete the result future and exit the dispatch. */
@@ -945,7 +1016,7 @@ public final class AsyncTransformer {
     // ------------------------------------------------------------------ debug metadata
 
     private static void appendDebug(StringBuilder sb, MethodNode mn, AbstractInsnNode awaitInsn,
-                                    int state, Frame<BasicValue> f) {
+                                    int state, Frame<BasicValue> f, BitSet live) {
         int line = -1;
         for (AbstractInsnNode p = awaitInsn; p != null; p = p.getPrevious())
             if (p instanceof LineNumberNode ln) { line = ln.line; break; }
@@ -957,6 +1028,8 @@ public final class AsyncTransformer {
         for (int v = 0; v < mn.maxLocals; v++) {
             BasicValue value = f.getLocal(v);
             if (!isSpillable(value) || isNullType(value.getType())) continue;
+            // dead ref slots are nulled at this state, not spilled — omit from the rendering
+            if (isRef(value.getType()) && !live.get(v)) continue;
             String name = localName(mn, v, awaitIdx);
             sb.append(first ? " " : " | ").append(name != null ? name : "local" + v)
               .append(" -> ").append(slotName(value.getType(), v));

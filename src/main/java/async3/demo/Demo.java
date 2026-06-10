@@ -88,9 +88,10 @@ public final class Demo {
         System.out.println("   sumTwice$async(done(5), done(\"s\")) = " + join(r1));
 
         banner("2. real suspension, resumed by manual completion on the main thread");
-        // The centerpiece. Watch the state advance and the spilled frame grow: after the
-        // first resume, x = 5 appears — rendered under its source name via the per-state
-        // $asyncDebug metadata. This is where the suggested breakpoints pay off.
+        // The centerpiece. Watch the state advance and the frame hold exactly what the
+        // resumed code can still read, under source names (per-state $asyncDebug metadata):
+        // at state 1 only fb (fa was consumed and its ref slot nulled — liveness-driven
+        // release); at state 2 only x. This is where the suggested breakpoints pay off.
         CompletableFuture<Integer> fa = new CompletableFuture<>();
         CompletableFuture<String> fb = new CompletableFuture<>();
         FutureStateMachine sm = newStateMachine(samples, loader, "sumTwice", fa, fb);

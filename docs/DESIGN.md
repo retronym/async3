@@ -65,7 +65,9 @@ Almost everything hard in `AsyncPhase` is an artifact of working on trees:
 - **`finally` is already duplicated** by codegen; the messiest control-flow
   case in the tree transform needs no special handling.
 - **Live-variable analysis** (the `LiveVariables` null-out machinery) becomes
-  a textbook bitvector dataflow over instructions.
+  a textbook bitvector dataflow over instructions. ✅ implemented
+  (`async3.transform.Liveness`, with conservative exception edges; drives the
+  dead-slot nulling of §5).
 
 ### 3.1 The transform, in one paragraph
 
@@ -172,7 +174,11 @@ to `long` slots (`floatToRawIntBits` etc.). One mutable frame per
 state-machine instance, slots addressed positionally (frame slot *v* = local
 slot *v*; stack entry *j* = `maxLocals + j`), reused across states, with
 liveness-driven nulling of dead ref slots (the bytecode analogue of
-`fieldsToNullOut`). "Typed fields on the SM class" is the planned optimization
+`fieldsToNullOut`). ✅ implemented: at each park, dead ref locals are not
+spilled and every ref slot not written at that state is nulled, so a suspended
+frame holds exactly the references the resumed code can still read; a dead
+ref local in scope restores as null, same as the nulled field in the tree
+transform. "Typed fields on the SM class" is the planned optimization
 for the AoT path — decide with JMH numbers, not vibes.
 
 Note the layout is per-state: slot *k* can hold different variables in
