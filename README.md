@@ -5,8 +5,6 @@ alternative to the tree-level `async` compiler phase
 (`scala.tools.nsc.transform.async.AsyncPhase`). Design rationale, prior art, and the phased
 plan live in [docs/DESIGN.md](docs/DESIGN.md).
 
-Fully independent of the Scala build:
-
 ```
 mvn test
 ```
@@ -80,17 +78,15 @@ you didn't build, and is idempotent with AoT-prepared classes.
 
 ## Debugging in IntelliJ
 
-1. Open `async3/pom.xml` as a (separate) Maven project — don't import it into the Scala
-   project model.
-2. Open `async3.demo.Demo` and **Debug `main()`** (it also works via
+1. Open `async3.demo.Demo` and **Debug `main()`** (it also works via
    `mvn -q compile exec:java -Dexec.mainClass=async3.demo.Demo` on the command line).
-3. **Best option — add `-javaagent:target/async3-0.1-SNAPSHOT.jar` to the run configuration's
+2. **Best option — add `-javaagent:target/async3-0.1-SNAPSHOT.jar` to the run configuration's
    VM options** (run `mvn -q -DskipTests package` first): breakpoints inside lambda bodies and
    marked methods then bind with no properties and no restrictions (see "Java agent" above).
-4. Without the agent, for the **lambda API** (Demo scenario 0): make sure
+3. Without the agent, for the **lambda API** (Demo scenario 0): make sure
    `-Dasync3.lambda.debuggable=true` is set (Demo sets it programmatically) and put line
    breakpoints inside the lambda body.
-5. For the class-based samples: set line breakpoints in
+4. For the class-based samples: set line breakpoints in
    [Samples.java](src/main/java/async3/samples/Samples.java) inside `sumTwice`, one per line.
 
 **Why the lambda case needs its own mode.** IntelliJ resolves a line inside a lambda body only
