@@ -3,7 +3,7 @@
 Standalone exploration of a **bytecode-level** async/await state-machine transform, as an
 alternative to the tree-level `async` compiler phase
 (`scala.tools.nsc.transform.async.AsyncPhase`). Design rationale, prior art, and the phased
-plan live in [../docs/DESIGN.md](../docs/DESIGN.md).
+plan live in [docs/DESIGN.md](docs/DESIGN.md).
 
 Fully independent of the Scala build:
 
@@ -131,19 +131,21 @@ What to expect:
 
 ## Layout
 
-- `async3.runtime.AsyncRT` — the `await` marker; its default implementation blocks ("tier 0").
+- [`async3.runtime.AsyncRT`](src/main/java/async3/runtime/AsyncRT.java) — the `await` marker; its default implementation blocks ("tier 0").
   Methods calling it run correctly with no transformation at all.
-- `async3.runtime.Async` — the lambda front end (`Async.async(() -> ... Async.await(f) ...)`)
+- [`async3.runtime.Async`](src/main/java/async3/runtime/Async.java) — the lambda front end (`Async.async(() -> ... Async.await(f) ...)`)
   via lambda cracking + `defineHiddenClass(NESTMATE)`, with the shadow-named debuggable mode.
-- `async3.runtime.FutureStateMachine` — state machine base class mirroring the ABI of
+- [`async3.runtime.FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) — state machine base class mirroring the ABI of
   `scala.tools.testkit.async.AsyncStateMachine`, plus the generic two-array frame
   (`Object[] refs` / `long[] prims`) used for captured locals and operand stack.
-- `async3.samples.Samples` — source-shape methods (plain synchronous Java calling `await`).
-- `async3.samples.HandWrittenSumTwice` — Phase 0: the expected transform output, by hand.
-- `async3.transform.AsyncTransformer` — Phase 1: the ASM transform. Derives a
+- [`async3.samples.Samples`](src/main/java/async3/samples/Samples.java) — source-shape methods (plain synchronous Java calling `await`).
+- [`async3.samples.HandWrittenSumTwice`](src/main/java/async3/samples/HandWrittenSumTwice.java) — Phase 0: the expected transform output, by hand.
+- [`async3.transform.AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) — Phase 1: the ASM transform. Derives a
   `<name>$async` entry point + `Owner$async$<name>$i` state machine class per marked method;
   leaves the original method untouched as the synchronous tier.
-- `src/test/java` — semantic equivalence matrix (fast path vs. real suspension), rejection
+- [`async3.agent.AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) — the Java agent that prepares resumable siblings at class-load time.
+- [`async3.demo.Demo`](src/main/java/async3/demo/Demo.java) — runnable demo exercising the lambda API, lift API, and agent path.
+- [`src/test/java`](src/test/java) — semantic equivalence matrix (fast path vs. real suspension), rejection
   tests (monitors, uninitialized `new` across a suspension), debug-metadata check.
 
 ## Status
@@ -165,6 +167,24 @@ shadow-named debuggable mode with JDI-verified breakpoint binding. `Async.lift(C
 named methods (static, unbound, bound, cross-class) into their suspending variants. The Java
 agent provides the in-place shape — resumable body as a sibling of the host class — with
 JDI-verified, restriction-free debugging, and is preferred automatically by `async`/`lift`.
+
+## Comparison with related systems
+
+See [docs/DESIGN.md](docs/DESIGN.md) for full design notes. A brief comparison:
+
+| System | Transform level | Suspension mechanism | Key trade-offs vs. async3 |
+|---|---|---|---|
+| **Project Loom** (JDK 21+) | VM-internal (native stack copying) | Block on a virtual thread; the runtime unmounts the carrier thread | Zero code changes, but JDK 21+ only; no Scala.js/Native; virtual-thread pinning in `synchronized`; collapses fork/join into sequential blocking — Optimus-style graph schedulers lose visibility into the dataflow graph |
+| **Kotlin coroutines** | Compiler backend (bytecode-level IR) | CPS transform; spills to named fields of a generated `Continuation` class | Closest relative — same bytecode-level approach. Kotlin generates a class per coroutine with typed fields; async3 uses a generic two-array frame (`long[]` + `Object[]`) so the transform works identically at compile time and at runtime without class generation per method |
+| **scala-async / `AsyncPhase`** | Compiler, on typed trees | ANF + lifting into state-machine wrapper class | The predecessor this project aims to replace. Tree-level work is inherently complex (ANF, symbol re-ownership, patmat interaction, value-class boxing). At bytecode level all of that disappears — locals are numbered slots, pattern matches are already branches, `finally` is already duplicated |
+| **Quasar** | Java agent / AoT ASM instrumentation | Generic `Stack` (`long[]` + `Object[]`) | Same frame representation as async3. Quasar requires ahead-of-time or agent instrumentation and is no longer maintained; async3 adds a runtime-triggered path (lambda cracking / `defineHiddenClass`) and profile-driven tiering |
+| **Kilim / Apache Javaflow** | AoT ASM instrumentation | Stack capture via bytecode rewriting | Same family as Quasar; Javaflow documents the uninitialized-object problem that async3 solves with Kotlin-style NEW-sinking |
+
+**In short:** Loom is the zero-effort baseline on JDK 21+ but doesn't cover non-JVM targets,
+pre-21 JVMs, or runtimes that need explicit fork/join scheduling. Kotlin coroutines validate
+the bytecode-level approach; async3 applies the same idea to Scala's existing async ABI with a
+generic frame that enables runtime-deferred ("tiered") transformation — run the blocking
+version first, swap in the suspendable one when profiling says it matters.
 
 ## Current limitations
 
