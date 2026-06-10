@@ -198,9 +198,8 @@ What to expect while stepping:
   `...sumTwice(...) suspended at state 2 (line 23): fa = ..., x = 5`.
 - **Stepping over an await that actually suspends steps out of the method** — `apply` parks
   and returns. That is faithful to what the machine does; put a breakpoint on the line after
-  the await to follow the logical flow (same experience as Kotlin coroutines without their
-  debugger plugin; an IntelliJ plugin that auto-plants those breakpoints is the eventual
-  answer).
+  the await to follow the logical flow — the same experience as Kotlin coroutines without
+  their debugger plugin, and closed the same way (see [Future work](#future-work)).
 
 ## How it compares
 
@@ -232,8 +231,28 @@ path vs. real suspension.
 **Rejected with diagnostics** (rather than miscompiled): await under a monitor, await in
 constructors.
 
-**Not yet:** liveness-based spilling (currently spills all assigned locals); the lazy
-`invokedynamic`/`MutableCallSite` tier switch; JMH numbers. See the design doc's phase list.
+## Future work
+
+- **Liveness-based spilling** — currently all assigned locals are spilled, not just live ones.
+- **The lazy tier switch** — `invokedynamic`/`MutableCallSite` dispatch that starts on the
+  blocking tier and flips to the transformed version when profiling says hot-and-blocking
+  (design doc [§7](docs/DESIGN.md#7-the-runtime-deferred-tiered-variant)); the agent already
+  materializes the method pair this needs.
+- **JMH numbers** — blocking vs. AoT-transformed vs. lazily flipped vs. the current compiler
+  phase's output; generic two-array frame vs. Kotlin-style typed fields.
+- **IDE debugger support** — the remaining stepping gap (step-over at a real suspension steps
+  out) is the same one Kotlin closes with dedicated tooling, which is the model to follow:
+  the IntelliJ Kotlin plugin's
+  [coroutine debugger](https://github.com/JetBrains/intellij-community/tree/master/plugins/kotlin/jvm-debugger/coroutines)
+  (a `PositionManager` plus an `AsyncStackTraceProvider` that render suspended coroutine
+  frames alongside real ones), backed by
+  [kotlinx-coroutines-debug](https://github.com/Kotlin/kotlinx.coroutines/tree/master/kotlinx-coroutines-debug)'s
+  `DebugProbes` agent for dumping live coroutines. async3's `$asyncDebug` metadata and
+  `AsyncDebug.describe` are the seed of the same capability: a small debugger extension could
+  auto-plant resume breakpoints for logical step-over and render suspended state machines as
+  async stack frames.
+
+See the design doc's [phase list](docs/DESIGN.md#8-prototype-plan) for the full plan.
 
 ## Layout
 

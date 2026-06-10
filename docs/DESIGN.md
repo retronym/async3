@@ -197,7 +197,13 @@ Two distinct problems:
    `suspended at Foo.scala:42: x=1, items=List(...)`.
 
 Bonus: give frames a `parent` pointer to the awaiting frame and logical async
-stack traces (Kotlin's `CoroutineStackFrame`) fall out nearly for free.
+stack traces (Kotlin's `CoroutineStackFrame`) fall out nearly for free. The
+consumer side is proven out by Kotlin's tooling: the IntelliJ plugin's
+[coroutine debugger](https://github.com/JetBrains/intellij-community/tree/master/plugins/kotlin/jvm-debugger/coroutines)
+(`PositionManager` + `AsyncStackTraceProvider` rendering suspended frames
+alongside real ones) and
+[kotlinx-coroutines-debug](https://github.com/Kotlin/kotlinx.coroutines/tree/master/kotlinx-coroutines-debug)'s
+`DebugProbes`. See the README's "Future work" for the async3 analogue.
 
 ## 7. The runtime-deferred ("tiered") variant
 
