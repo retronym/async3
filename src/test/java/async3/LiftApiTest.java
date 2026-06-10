@@ -85,6 +85,22 @@ class LiftApiTest {
         assertEquals(42, inc.apply(later(41)).join());
     }
 
+    /** The top rung of the generated arity ladder: 21 captured-as-arguments ints + 1 future. */
+    @Test
+    void arity22() {
+        Async.Fn22<Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
+                Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer, Integer,
+                Integer, Integer, Integer, CompletableFuture<Integer>, Integer> sumAll =
+                (a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18,
+                 a19, a20, a21, f) ->
+                        a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14
+                                + a15 + a16 + a17 + a18 + a19 + a20 + a21 + Async.await(f);
+        var lifted = Async.lift(sumAll);
+        // 1 + 2 + ... + 21 = 231, plus 9 from the awaited future
+        assertEquals(240, lifted.apply(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                18, 19, 20, 21, later(9)).join());
+    }
+
     @Test
     void constructorRefRejected() {
         UnsupportedOperationException e = assertThrows(UnsupportedOperationException.class,

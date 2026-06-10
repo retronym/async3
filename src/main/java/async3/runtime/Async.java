@@ -96,15 +96,74 @@ public final class Async {
     // ------------------------------------------------------------------ lift: method references
 
     // Serializable SAM types so a method reference can be cracked. Arity disambiguates overloads.
+    // Fn0..Fn22, Lifted0..Lifted22 and the lift overloads below are generated, up to arity 22
+    // (the traditional Scala ceiling). Regenerate with `jshell -q gen.jsh` where gen.jsh is:
+    //
+    //   int N = 22;
+    //   StringBuilder fn = new StringBuilder(), li = new StringBuilder(), ov = new StringBuilder();
+    //   for (int n = 0; n <= N; n++) {
+    //       StringJoiner tp = new StringJoiner(", "), ps = new StringJoiner(", "), as = new StringJoiner(", ");
+    //       for (int i = 1; i <= n; i++) { tp.add("T" + i); ps.add("T" + i + " t" + i); as.add("t" + i); }
+    //       String tpr = (n == 0 ? "" : tp + ", ") + "R";
+    //       fn.append("    @FunctionalInterface public interface Fn" + n + "<" + tpr
+    //               + "> extends Serializable { R apply(" + ps + "); }\n");
+    //       li.append("    @FunctionalInterface public interface Lifted" + n + "<" + tpr
+    //               + "> { CompletableFuture<R> apply(" + ps + "); }\n");
+    //       String lam = n == 1 ? "t1" : "(" + as + ")";
+    //       ov.append("    public static <" + tpr + "> Lifted" + n + "<" + tpr + "> lift(Fn" + n + "<" + tpr
+    //               + "> ref) {\n        Lifted l = liftImpl(ref);\n        return " + lam
+    //               + " -> cast(l.invoke(" + as + "));\n    }\n\n");
+    //   }
+    //   System.out.println(fn + "\n" + li + "\n" + ov);
+    //   /exit
+
     @FunctionalInterface public interface Fn0<R> extends Serializable { R apply(); }
-    @FunctionalInterface public interface Fn1<A, R> extends Serializable { R apply(A a); }
-    @FunctionalInterface public interface Fn2<A, B, R> extends Serializable { R apply(A a, B b); }
-    @FunctionalInterface public interface Fn3<A, B, C, R> extends Serializable { R apply(A a, B b, C c); }
+    @FunctionalInterface public interface Fn1<T1, R> extends Serializable { R apply(T1 t1); }
+    @FunctionalInterface public interface Fn2<T1, T2, R> extends Serializable { R apply(T1 t1, T2 t2); }
+    @FunctionalInterface public interface Fn3<T1, T2, T3, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3); }
+    @FunctionalInterface public interface Fn4<T1, T2, T3, T4, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4); }
+    @FunctionalInterface public interface Fn5<T1, T2, T3, T4, T5, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5); }
+    @FunctionalInterface public interface Fn6<T1, T2, T3, T4, T5, T6, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6); }
+    @FunctionalInterface public interface Fn7<T1, T2, T3, T4, T5, T6, T7, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7); }
+    @FunctionalInterface public interface Fn8<T1, T2, T3, T4, T5, T6, T7, T8, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8); }
+    @FunctionalInterface public interface Fn9<T1, T2, T3, T4, T5, T6, T7, T8, T9, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9); }
+    @FunctionalInterface public interface Fn10<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10); }
+    @FunctionalInterface public interface Fn11<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11); }
+    @FunctionalInterface public interface Fn12<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12); }
+    @FunctionalInterface public interface Fn13<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13); }
+    @FunctionalInterface public interface Fn14<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14); }
+    @FunctionalInterface public interface Fn15<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15); }
+    @FunctionalInterface public interface Fn16<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16); }
+    @FunctionalInterface public interface Fn17<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17); }
+    @FunctionalInterface public interface Fn18<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18); }
+    @FunctionalInterface public interface Fn19<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19); }
+    @FunctionalInterface public interface Fn20<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19, T20 t20); }
+    @FunctionalInterface public interface Fn21<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19, T20 t20, T21 t21); }
+    @FunctionalInterface public interface Fn22<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, T22, R> extends Serializable { R apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19, T20 t20, T21 t21, T22 t22); }
 
     @FunctionalInterface public interface Lifted0<R> { CompletableFuture<R> apply(); }
-    @FunctionalInterface public interface Lifted1<A, R> { CompletableFuture<R> apply(A a); }
-    @FunctionalInterface public interface Lifted2<A, B, R> { CompletableFuture<R> apply(A a, B b); }
-    @FunctionalInterface public interface Lifted3<A, B, C, R> { CompletableFuture<R> apply(A a, B b, C c); }
+    @FunctionalInterface public interface Lifted1<T1, R> { CompletableFuture<R> apply(T1 t1); }
+    @FunctionalInterface public interface Lifted2<T1, T2, R> { CompletableFuture<R> apply(T1 t1, T2 t2); }
+    @FunctionalInterface public interface Lifted3<T1, T2, T3, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3); }
+    @FunctionalInterface public interface Lifted4<T1, T2, T3, T4, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4); }
+    @FunctionalInterface public interface Lifted5<T1, T2, T3, T4, T5, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5); }
+    @FunctionalInterface public interface Lifted6<T1, T2, T3, T4, T5, T6, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6); }
+    @FunctionalInterface public interface Lifted7<T1, T2, T3, T4, T5, T6, T7, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7); }
+    @FunctionalInterface public interface Lifted8<T1, T2, T3, T4, T5, T6, T7, T8, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8); }
+    @FunctionalInterface public interface Lifted9<T1, T2, T3, T4, T5, T6, T7, T8, T9, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9); }
+    @FunctionalInterface public interface Lifted10<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10); }
+    @FunctionalInterface public interface Lifted11<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11); }
+    @FunctionalInterface public interface Lifted12<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12); }
+    @FunctionalInterface public interface Lifted13<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13); }
+    @FunctionalInterface public interface Lifted14<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14); }
+    @FunctionalInterface public interface Lifted15<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15); }
+    @FunctionalInterface public interface Lifted16<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16); }
+    @FunctionalInterface public interface Lifted17<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17); }
+    @FunctionalInterface public interface Lifted18<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18); }
+    @FunctionalInterface public interface Lifted19<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19); }
+    @FunctionalInterface public interface Lifted20<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19, T20 t20); }
+    @FunctionalInterface public interface Lifted21<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19, T20 t20, T21 t21); }
+    @FunctionalInterface public interface Lifted22<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, T22, R> { CompletableFuture<R> apply(T1 t1, T2 t2, T3 t3, T4 t4, T5 t5, T6 t6, T7 t7, T8 t8, T9 t9, T10 t10, T11 t11, T12 t12, T13 t13, T14 t14, T15 t15, T16 t16, T17 t17, T18 t18, T19 t19, T20 t20, T21 t21, T22 t22); }
 
     /**
      * Lifts the referenced method into its suspending variant: the runtime analogue of the
@@ -121,19 +180,114 @@ public final class Async {
         return () -> cast(l.invoke());
     }
 
-    public static <A, R> Lifted1<A, R> lift(Fn1<A, R> ref) {
+    public static <T1, R> Lifted1<T1, R> lift(Fn1<T1, R> ref) {
         Lifted l = liftImpl(ref);
-        return a -> cast(l.invoke(a));
+        return t1 -> cast(l.invoke(t1));
     }
 
-    public static <A, B, R> Lifted2<A, B, R> lift(Fn2<A, B, R> ref) {
+    public static <T1, T2, R> Lifted2<T1, T2, R> lift(Fn2<T1, T2, R> ref) {
         Lifted l = liftImpl(ref);
-        return (a, b) -> cast(l.invoke(a, b));
+        return (t1, t2) -> cast(l.invoke(t1, t2));
     }
 
-    public static <A, B, C, R> Lifted3<A, B, C, R> lift(Fn3<A, B, C, R> ref) {
+    public static <T1, T2, T3, R> Lifted3<T1, T2, T3, R> lift(Fn3<T1, T2, T3, R> ref) {
         Lifted l = liftImpl(ref);
-        return (a, b, c) -> cast(l.invoke(a, b, c));
+        return (t1, t2, t3) -> cast(l.invoke(t1, t2, t3));
+    }
+
+    public static <T1, T2, T3, T4, R> Lifted4<T1, T2, T3, T4, R> lift(Fn4<T1, T2, T3, T4, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4) -> cast(l.invoke(t1, t2, t3, t4));
+    }
+
+    public static <T1, T2, T3, T4, T5, R> Lifted5<T1, T2, T3, T4, T5, R> lift(Fn5<T1, T2, T3, T4, T5, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5) -> cast(l.invoke(t1, t2, t3, t4, t5));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, R> Lifted6<T1, T2, T3, T4, T5, T6, R> lift(Fn6<T1, T2, T3, T4, T5, T6, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6) -> cast(l.invoke(t1, t2, t3, t4, t5, t6));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, R> Lifted7<T1, T2, T3, T4, T5, T6, T7, R> lift(Fn7<T1, T2, T3, T4, T5, T6, T7, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, R> Lifted8<T1, T2, T3, T4, T5, T6, T7, T8, R> lift(Fn8<T1, T2, T3, T4, T5, T6, T7, T8, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, R> Lifted9<T1, T2, T3, T4, T5, T6, T7, T8, T9, R> lift(Fn9<T1, T2, T3, T4, T5, T6, T7, T8, T9, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, R> Lifted10<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, R> lift(Fn10<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, R> Lifted11<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, R> lift(Fn11<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, R> Lifted12<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, R> lift(Fn12<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, R> Lifted13<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, R> lift(Fn13<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, R> Lifted14<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, R> lift(Fn14<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, R> Lifted15<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, R> lift(Fn15<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, R> Lifted16<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, R> lift(Fn16<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, R> Lifted17<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, R> lift(Fn17<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, R> Lifted18<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, R> lift(Fn18<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, R> Lifted19<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, R> lift(Fn19<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, R> Lifted20<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, R> lift(Fn20<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, R> Lifted21<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, R> lift(Fn21<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21));
+    }
+
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, T22, R> Lifted22<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, T22, R> lift(Fn22<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20, T21, T22, R> ref) {
+        Lifted l = liftImpl(ref);
+        return (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21, t22) -> cast(l.invoke(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17, t18, t19, t20, t21, t22));
     }
 
     private static Lifted liftImpl(Serializable ref) {
