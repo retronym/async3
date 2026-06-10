@@ -332,6 +332,12 @@ public final class Async {
         return cast(new Lifted(invoker, capturedArgs(sl)).invoke());
     }
 
+    /**
+     * One invoker per impl method, keyed by its fully-qualified name + signature (plus the
+     * debuggable mode, which changes the generated shape). The cache makes {@link #compile} —
+     * and therefore the agent probe and, absent the agent, the read/parse/transform/define
+     * fallback — a first-use-only cost per lambda; later uses are a map hit.
+     */
     private static MethodHandle invokerFor(MethodHandles.Lookup lookup, Serializable ref, SerializedLambda sl) {
         String key = (debuggable() ? "shadow:" : "hidden:")
                 + sl.getImplClass() + "." + sl.getImplMethodName() + sl.getImplMethodSignature();
@@ -355,10 +361,14 @@ public final class Async {
     }
 
     /**
-     * If the agent prepared this method at class load time, use its {@code m$async} entry point:
-     * the resumable body then executes in the host class itself (breakpoints bind, private
-     * access is same-class), and no cracking-time transformation happens at all. AoT-transformed
-     * classes carrying the same entries are picked up identically.
+     * The probe tier of {@link #compile}: look for a prepared {@code m$async} sibling of the
+     * impl method. It exists when the class was loaded under the agent (which adds the pair
+     * for every marked method at class-load time) or was AoT-transformed — deliberately
+     * indistinguishable here. When bound, the resumable body executes in the host class
+     * itself (breakpoints bind, private access is same-class) and the fallback never runs.
+     *
+     * <p>Absence — any {@link ReflectiveOperationException} — is the expected "not prepared"
+     * signal, answered with null, not an error.
      */
     private static MethodHandle agentEntry(Class<?> capturingClass, MethodHandles.Lookup callerLookup,
                                            SerializedLambda sl, ClassLoader loader) {
@@ -373,7 +383,7 @@ public final class Async {
                     ? l.findStatic(capturingClass, name, entryType)
                     : l.findVirtual(capturingClass, name, entryType);
         } catch (ReflectiveOperationException e) {
-            return null; // no agent-prepared entry; fall back to cracking-time transformation
+            return null; // not prepared: compile() falls back to transformAtRuntime
         }
     }
 
@@ -394,50 +404,78 @@ public final class Async {
         }
     }
 
+    /**
+     * Produces the invoker for one impl method. Called at most once per method — see the
+     * {@link #invokerFor} cache. Two tiers, tried in order:
+     *
+     * <ol>
+     *   <li><b>{@link #agentEntry} (probe)</b>: if the capturing class already carries a
+     *       prepared {@code m$async} sibling — loaded under the agent, or AoT-transformed —
+     *       bind it and stop. Cost: one reflective lookup; the class file is never read and
+     *       nothing is generated.</li>
+     *   <li><b>{@link #transformAtRuntime} (fallback)</b>: read the capturing class's bytecode
+     *       back from its class loader, transform the single impl method, and define the
+     *       state machine (hidden nestmate by default; shadow class in debuggable mode).</li>
+     * </ol>
+     *
+     * <p><b>Cost model of the fallback.</b> {@code transformMethod} parses the <em>whole</em>
+     * capturing class to extract one method, so a class with N async lambdas is re-read and
+     * re-parsed N times — once per distinct impl method, on its first use; after that the
+     * cached invoker is a plain constructor handle + {@code start()}. The redundancy is
+     * deliberate prototype simplicity: a per-class bytes/ClassNode cache would amortize it,
+     * but the cost is one-time, small next to class definition, and entirely absent under the
+     * agent, whose {@code transformInPlace} prepares all N methods in a single parse at class
+     * load. The eventual {@code invokedynamic} integration likewise pays the fallback at most
+     * once per call site, in the bootstrap.
+     */
     private static MethodHandle compile(MethodHandles.Lookup callerLookup, ClassLoader loader, SerializedLambda sl) {
         try {
             Class<?> capturingClass = Class.forName(sl.getImplClass().replace('/', '.'), false, loader);
-
-            MethodHandle viaAgent = agentEntry(capturingClass, callerLookup, sl, loader);
-            if (viaAgent != null) return viaAgent;
-
-            byte[] hostBytes;
-            try (InputStream in = loader.getResourceAsStream(sl.getImplClass() + ".class")) {
-                if (in == null)
-                    throw new IllegalStateException("cannot read bytecode of " + sl.getImplClass());
-                hostBytes = in.readAllBytes();
-            } catch (java.io.IOException e) {
-                throw new IllegalStateException(e);
-            }
-
-            boolean shadow = debuggable();
-            AsyncTransformer.SingleMethod sm = AsyncTransformer.transformMethod(
-                    hostBytes, sl.getImplMethodName(), sl.getImplMethodSignature(), shadow);
-
-            String dumpDir = System.getProperty("async3.lambda.dump");
-            if (dumpDir != null) {
-                // shadow classes share the host's name; suffix the dump file to avoid clobbering
-                Path p = Path.of(dumpDir).resolve(
-                        sm.name.replace('.', '/') + (shadow ? "$shadow$" + sl.getImplMethodName() : "") + ".class");
-                Files.createDirectories(p.getParent());
-                Files.write(p, sm.bytes);
-            }
-
-            if (shadow) {
-                Class<?> smClass = new OneShotLoader(loader).define(sm.name, sm.bytes);
-                return toInvoker(MethodHandles.lookup().unreflectConstructor(smClass.getDeclaredConstructors()[0]));
-            }
-
-            MethodHandles.Lookup lookup = callerLookup != null
-                    ? callerLookup
-                    : MethodHandles.privateLookupIn(capturingClass, MethodHandles.lookup());
-            MethodHandles.Lookup smLookup =
-                    lookup.defineHiddenClass(sm.bytes, false, MethodHandles.Lookup.ClassOption.NESTMATE);
-            MethodType ctorType = MethodType.fromMethodDescriptorString(sm.constructorDescriptor, loader);
-            return toInvoker(smLookup.findConstructor(smLookup.lookupClass(), ctorType));
+            MethodHandle prepared = agentEntry(capturingClass, callerLookup, sl, loader);
+            return prepared != null
+                    ? prepared
+                    : transformAtRuntime(callerLookup, loader, sl, capturingClass);
         } catch (ReflectiveOperationException | java.io.IOException e) {
             throw new IllegalStateException("failed to compile async lambda " + sl.getImplMethodName(), e);
         }
+    }
+
+    /** The fallback tier of {@link #compile}: cracking-time transformation of one impl method. */
+    private static MethodHandle transformAtRuntime(MethodHandles.Lookup callerLookup, ClassLoader loader,
+                                                   SerializedLambda sl, Class<?> capturingClass)
+            throws ReflectiveOperationException, java.io.IOException {
+        byte[] hostBytes;
+        try (InputStream in = loader.getResourceAsStream(sl.getImplClass() + ".class")) {
+            if (in == null)
+                throw new IllegalStateException("cannot read bytecode of " + sl.getImplClass());
+            hostBytes = in.readAllBytes();
+        }
+
+        boolean shadow = debuggable();
+        AsyncTransformer.SingleMethod sm = AsyncTransformer.transformMethod(
+                hostBytes, sl.getImplMethodName(), sl.getImplMethodSignature(), shadow);
+
+        String dumpDir = System.getProperty("async3.lambda.dump");
+        if (dumpDir != null) {
+            // shadow classes share the host's name; suffix the dump file to avoid clobbering
+            Path p = Path.of(dumpDir).resolve(
+                    sm.name.replace('.', '/') + (shadow ? "$shadow$" + sl.getImplMethodName() : "") + ".class");
+            Files.createDirectories(p.getParent());
+            Files.write(p, sm.bytes);
+        }
+
+        if (shadow) {
+            Class<?> smClass = new OneShotLoader(loader).define(sm.name, sm.bytes);
+            return toInvoker(MethodHandles.lookup().unreflectConstructor(smClass.getDeclaredConstructors()[0]));
+        }
+
+        MethodHandles.Lookup lookup = callerLookup != null
+                ? callerLookup
+                : MethodHandles.privateLookupIn(capturingClass, MethodHandles.lookup());
+        MethodHandles.Lookup smLookup =
+                lookup.defineHiddenClass(sm.bytes, false, MethodHandles.Lookup.ClassOption.NESTMATE);
+        MethodType ctorType = MethodType.fromMethodDescriptorString(sm.constructorDescriptor, loader);
+        return toInvoker(smLookup.findConstructor(smLookup.lookupClass(), ctorType));
     }
 
     private static boolean debuggable() {

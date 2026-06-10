@@ -185,6 +185,14 @@ workaround), are in the design doc's
 [§7.5](docs/DESIGN.md#75-lambda-front-end-prototype-of-the-runtime-triggered-transform);
 under the agent the issue doesn't exist.
 
+Cost model: resolution is a two-tier chain, cached per impl method. The first use of each
+lambda probes for the prepared `m$async` entry (one reflective lookup); only if absent does
+the fallback read the capturing class's bytecode back from the loader, parse it, transform
+the one method, and define the state machine — so a class with N async lambdas is parsed N
+times without the agent, once per lambda, first use only. The agent inverts this: one parse
+per class at load time prepares all N methods, and the runtime tier never reads bytecode at
+all.
+
 ## Debugging in IntelliJ
 
 1. `mvn -q -DskipTests package`, then add `-javaagent:target/async3-0.1-SNAPSHOT.jar` to the
