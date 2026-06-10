@@ -18,25 +18,34 @@ import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Debugger walkthrough. Run or debug this {@code main} from IntelliJ (see "Debugging in
- * IntelliJ" in the README).
+ * The guided tour. Six scenarios, each a one-liner of output; total runtime well under a
+ * second. Works as a plain run, but is written to be <b>debugged</b> — see "Debugging in
+ * IntelliJ" in the README.
  *
- * <p>Suggested breakpoints, all in {@code Samples.java} inside {@code sumTwice}:
+ * <p>The 60-second version: build the agent jar ({@code mvn -q -DskipTests package}), add
+ * {@code -javaagent:target/async3-0.1-SNAPSHOT.jar} to the VM options, and put three line
+ * breakpoints in {@code Samples.sumTwice} —
  * <pre>
  *   int x = AsyncRT.await(fa);     // hit on entry (state 0)
  *   String s = AsyncRT.await(fb);  // hit after the first resume — inspect x in Variables
  *   return s + ":" + (x * 2);      // hit after the second resume — inspect x and s
  * </pre>
- * In scenario 2 the futures are completed manually from this thread, so every resume runs on
- * the main thread and the whole session is a single linear debug story. The Variables view
- * shows the original names (from the carried-over LocalVariableTable); {@code this} is the
- * state machine — expand {@code refs}/{@code prims} to see the raw spilled frame.
+ * — then debug this {@code main} and watch scenario 2. The futures there are completed
+ * manually from the main thread, so every resume runs synchronously right here: a linear,
+ * single-threaded debug story through code that genuinely suspends twice. The Variables view
+ * shows the original names ({@code x}, not {@code prims[2]}) because the transform carries
+ * the LocalVariableTable over; {@code this} in those frames is the state machine — expand
+ * {@code refs}/{@code prims} to see the raw spilled frame, or evaluate
+ * {@code AsyncDebug.describe(this)}. Under the agent, breakpoints inside the scenario-0
+ * lambda bind too, because the resumable body stays in the class the source lines belong to.
  */
 public final class Demo {
 
     public static void main(String[] args) throws Throwable {
         Path dumpDir = Path.of("target", "transformed-classes");
 
+        // Every generated class is written out for inspection; the README's javap excerpts
+        // come from exactly these files.
         AsyncTransformer.Result samples = transformAndDump(Samples.class, dumpDir);
         AsyncTransformer.Result newSink = transformAndDump(NewSinkSamples.class, dumpDir);
         AsyncTransformer.Result instances = transformAndDump(InstanceSamples.class, dumpDir);
@@ -46,14 +55,16 @@ public final class Demo {
         ClassLoader loader = new InMemoryClassLoader(samples, Demo.class.getClassLoader());
         Class<?> samplesT = Class.forName(samples.hostName, true, loader);
 
-        // Shadow-debuggable lambda mode: line breakpoints set inside the lambda body below
-        // bind and fire (see README "Debugging in IntelliJ"). Without this property the state
-        // machine is a hidden nestmate class instead: full private access, but IDE line
-        // breakpoints in the body won't bind.
+        // Fallback for runs without -javaagent: lets IDE line breakpoints inside the lambda
+        // body below bind anyway (see README). Moot under the agent, which is debuggable by
+        // construction and takes precedence.
         System.setProperty("async3.lambda.debuggable", "true");
         System.setProperty("async3.lambda.dump", dumpDir.toString());
 
-        banner("0. lambda API: Async.async(() -> ...) — transform triggered by lambda cracking");
+        banner("0. the API: Async.async(() -> ...) and Async.lift(C::m)");
+        // Under -javaagent this binds the agent-prepared entry in the host class; without it,
+        // Async.async cracks the lambda to find the synthetic lambda$ impl method javac
+        // generated and transforms its bytecode at runtime. Same result either way.
         CompletableFuture<Integer> la = later(20);
         CompletableFuture<Integer> lb = later(22);
         CompletableFuture<Integer> sum = Async.async(() -> {
@@ -63,18 +74,23 @@ public final class Demo {
         });
         System.out.println("   Async.async(() -> await(la) + await(lb)) = " + sum.join());
 
-        // lift: derive the suspending variant of an existing method (here from another class) —
-        // the runtime analogue of the annotation-driven frontend's direct/$queued method pair.
+        // Async.lift: derive the suspending variant of an existing method — here a method of
+        // another class, written with zero knowledge of this call. The runtime analogue of
+        // the annotation-driven frontend's direct/$queued method pair.
         Async.Lifted2<CompletableFuture<Integer>, CompletableFuture<String>, String> sumTwice =
                 Async.lift(Samples::sumTwice);
         System.out.println("   Async.lift(Samples::sumTwice).apply(later(5), later(\"s\")) = "
                 + sumTwice.apply(later(5), later("s")).join());
 
         banner("1. fast path: already-completed futures, runs start-to-finish on this thread");
+        // getCompleted short-circuits each await: no spill, no park, no executor hop.
         Object r1 = call(samplesT, null, "sumTwice$async", done(5), done("s"));
         System.out.println("   sumTwice$async(done(5), done(\"s\")) = " + join(r1));
 
         banner("2. real suspension, resumed by manual completion on the main thread");
+        // The centerpiece. Watch the state advance and the spilled frame grow: after the
+        // first resume, x = 5 appears — rendered under its source name via the per-state
+        // $asyncDebug metadata. This is where the suggested breakpoints pay off.
         CompletableFuture<Integer> fa = new CompletableFuture<>();
         CompletableFuture<String> fb = new CompletableFuture<>();
         FutureStateMachine sm = newStateMachine(samples, loader, "sumTwice", fa, fb);
@@ -86,12 +102,17 @@ public final class Demo {
         System.out.println("   result = " + result.join());
 
         banner("3. NEW-sinking: new Pair(await(f), await(g))");
+        // An uninitialized object may not sit on the stack across a suspension point (JVMS
+        // 4.10.2.4) — the classic blocker for bytecode-level coroutines (see Javaflow's
+        // docs). The transform sinks the NEW/DUP below the awaits, Kotlin-style.
         ClassLoader nsLoader = new InMemoryClassLoader(newSink, Demo.class.getClassLoader());
         Class<?> newSinkT = Class.forName(newSink.hostName, true, nsLoader);
         Object r3 = call(newSinkT, null, "twoArgs$async", later(5), later("s"));
         System.out.println("   twoArgs$async(later(5), later(\"s\")) = " + join(r3));
 
         banner("4. instance method: `this` captured, private members via nestmate linkage");
+        // `this` is just entry local 0, spilled like any other value; the generated state
+        // machine joins the host's nest so the body's private field reads keep working.
         ClassLoader instLoader = new InMemoryClassLoader(instances, Demo.class.getClassLoader());
         Class<?> instT = Class.forName(instances.hostName, true, instLoader);
         Object inst = instT.getConstructor(int.class, String.class).newInstance(10, "L");
@@ -99,6 +120,9 @@ public final class Demo {
         System.out.println("   new InstanceSamples(10, \"L\").compute$async(later(3), later(4)) = " + join(r4));
 
         banner("5. the blocking tier: the same class, untransformed method, just blocks");
+        // The original method is byte-identical to what javac produced — await's default
+        // implementation blocks. This is what makes lazy, profile-driven transformation
+        // possible: untransformed code is not broken code, just synchronous code.
         System.out.println("   sumTwice(done(5), done(\"s\")) = " + call(samplesT, null, "sumTwice", done(5), done("s")));
     }
 

@@ -1,6 +1,9 @@
 # async3: a bytecode-level async transform (design notes & prototype plan)
 
-Status: exploratory prototype. See `./async3` for the standalone Maven project.
+Status: exploratory prototype. The repository root is the standalone Maven
+project; the [README](../README.md) is the guided tour (usage, transcripts,
+javap of the generated shapes, debugging instructions, comparison table).
+This document is the rationale and the plan.
 
 ## 1. Motivation
 
@@ -38,7 +41,8 @@ suspendable version.
 
 Everything below has been done before in some form; the novelty is wiring it to
 Scala's existing frontend-pluggable async ABI and the *lazy, profile-driven*
-variant.
+variant. (A reader-facing trade-off comparison of the same systems is in the
+README's "How it compares".)
 
 ## 3. Why bytecode level is easier
 
@@ -221,11 +225,12 @@ The dispatch mechanism matters more than the transform:
 
 **The Loom question, answered up front:** this runtime variant is userland
 Loom. On JDK 21+, "run the sync version, block on a virtual thread" is already
-a fine steady state. The case for the transform is everything Loom doesn't
-cover: Scala.js and Scala Native, pre-21 JVMs, pinning-sensitive or
-allocation-sensitive environments, and runtimes (Optimus-style graph
-schedulers) that need their own notion of suspension and scheduling rather
-than thread semantics. **Forking is the sharpest example**: Optimus separates
+a fine steady state. The case for the transform is what Loom doesn't cover:
+pre-21 JVMs, pinning-sensitive or allocation-sensitive environments, and
+runtimes (Optimus-style graph schedulers) that need their own notion of
+suspension and scheduling rather than thread semantics. (Non-JVM targets are
+*not* a differentiator: a bytecode-level transform is exactly as JVM-bound as
+Loom; Scala.js/Native would need their own IR-level equivalent either way.) **Forking is the sharpest example**: Optimus separates
 *queuing* a computation (`g$queued(...)` returns a Node immediately) from
 *awaiting* it, so several child computations can be forked before the first
 suspension — which is what makes auto-parallelism, batching, deduplication,
@@ -337,7 +342,7 @@ Not covered by the agent: stepping over a real suspension still steps out
 `ClassFileTransformer` never sees hidden classes (irrelevant here — lambda
 bodies live in ordinary capturing classes).
 
-## 8. Prototype plan (`./async3`, standalone Maven project)
+## 8. Prototype plan
 
 Plain Java + upstream ASM (`asm-tree`/`asm-analysis`/`asm-util`); no scalac
 involvement until the final phase. The repo's shaded `scala.tools.asm` is

@@ -1,190 +1,249 @@
-# async3 prototype
+# async3
 
-Standalone exploration of a **bytecode-level** async/await state-machine transform, as an
-alternative to the tree-level `async` compiler phase
-(`scala.tools.nsc.transform.async.AsyncPhase`). Design rationale, prior art, and the phased
-plan live in [docs/DESIGN.md](docs/DESIGN.md).
+**async/await as a bytecode transform** — a standalone prototype exploring whether Scala's
+tree-level `async` compiler phase (`scala.tools.nsc.transform.async.AsyncPhase`, with its ANF
+transform, live-variable analysis, and `Lifter`/`UseFields` machinery) can be replaced by a
+rewrite on bytecode, where most of that machinery has no reason to exist: locals are numbered
+slots, pattern matches are already branches, `finally` is already duplicated, and the operand
+stack is just more state to spill.
+
+Plain Java + ASM, no dependency on the Scala build. Design rationale, prior art, and the
+phased plan: [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
-mvn test
+mvn test                                              # 52 tests
+mvn -q compile exec:java -Dexec.mainClass=async3.demo.Demo
 ```
 
-## Lambda API
+## The idea in one method
 
-No pre-compiled sample classes or reflection needed — the transform is triggered at runtime by
-*cracking* the (serializable) lambda:
+You write an ordinary, synchronous method. `await` is a real static method whose default
+implementation just blocks — so this code runs correctly, as-is, with no transformation
+("tier 0"):
 
 ```java
-CompletableFuture<String> r = Async.async(() -> {
-    int x = Async.await(fa);
-    String s = Async.await(fb);
+public static String sumTwice(CompletableFuture<Integer> fa, CompletableFuture<String> fb) {
+    int x = AsyncRT.await(fa);
+    String s = AsyncRT.await(fb);
     return s + ":" + (x * 2);
-});
+}
 ```
 
-`Async.async` cracks the lambda via `writeReplace` → `SerializedLambda`, which names the
-synthetic `lambda$...` impl method (where javac put the body's bytecode, in the capturing
-class) and carries the captured arguments. The impl method goes through
-`AsyncTransformer.transformMethod` and the state machine is defined as a **hidden class with
-the NESTMATE option**, so the body keeps access to private members of the capturing class.
-Captured locals (including a captured `this`) are just the impl method's leading parameters.
-Compiled once per lambda, cached. This is a faithful stand-in for the eventual compiler
-integration, where `async { ... }` compiles to `invokedynamic` and the bootstrap receives the
-caller's `Lookup` for free.
+The ASM transform leaves that method byte-identical and derives a suspending sibling next to
+it. `javap` on the transformed class:
 
-### Lifting method references
-
-`Async.lift(C::m)` derives the suspending variant of an existing method — possibly from
-another class — at runtime: the runtime analogue of the annotation-driven (Optimus-style)
-frontend's direct/`$queued` method pair, with no build-time sibling generation:
-
-```java
-// Samples.sumTwice is an ordinary method that calls the await markers;
-// called directly it blocks (tier 0), lifted it suspends:
-var sumTwice = Async.lift(Samples::sumTwice);
-CompletableFuture<String> r = sumTwice.apply(fa, fb);
+```
+public static java.util.concurrent.CompletableFuture sumTwice$async(CompletableFuture, CompletableFuture);
+  Code:
+     0: new           #9    // class async3/samples/Samples$async$sumTwice$1
+     3: dup
+     4: aload_0
+     5: aload_1
+     6: invokespecial #168  // Method Samples$async$sumTwice$1."<init>":(...)V
+     9: invokevirtual #169  // Method Samples$async$sumTwice$1.start:()Ljava/util/concurrent/CompletableFuture;
+    12: areturn
 ```
 
-All reference shapes work: static, unbound instance (`C::m` — receiver becomes the first
-parameter), bound instance (`obj::m` — receiver is a captured argument), private targets (the
-hidden state machine joins the target's nest), and plain lambdas with parameters. Captured and
-applied arguments concatenate into the target's entry locals, so one mechanism covers every
-shape. Constructor references are rejected (no await in constructors). A lifted handle is also
-the natural installation point for the phase-4 profiling-driven tier flip
-(`MutableCallSite`: start blocking, swap in the transformed version when hot).
+The generated state machine's `apply` is the original method body, re-entrant. Dispatch is a
+`tableswitch` on the state; each state re-loads its live frame from a generic two-array spill
+(`Object[] refs` / `long[] prims` — no per-method field layout, same trick as Quasar/Kilim):
 
-## Java agent (the best shape)
+```
+public void apply(java.lang.Object);
+  Code:
+       0: aload_0
+       1: getfield      #26   // Field FutureStateMachine.state:I
+       4: tableswitch   { 0: 32, 1: 55, 2: 78, default: 110 }
+      ...
+      // the await site itself: set next state, fast-path check, park if incomplete
+     172: aload_3
+     175: aload_0
+     176: iconst_2
+     177: putfield      #26   // state = 2
+     180: ...
+     183: invokevirtual #41   // getCompleted — fast path: skip suspension if already done
+     186: dup
+     187: ifnonnull     221
+     190: ...                 // spill fa, fb, x into refs[]/prims[]
+     215: ...
+     217: invokevirtual #45   // onComplete — park; resumes apply() when the future fires
+     220: return
+     221: astore_1            // resumption point: completed value lands here
+     222: ...
+```
+
+The original `LocalVariableTable` is carried over and remapped, so a debugger sees source
+names, not slots:
+
+```
+LocalVariableTable:
+  Start  Length  Slot  Name   Signature
+    118     134     2    fa   Ljava/util/concurrent/CompletableFuture;
+    118     134     3    fb   Ljava/util/concurrent/CompletableFuture;
+    172      80     4     x   I
+    232      20     5     s   Ljava/lang/String;
+```
+
+Because the blocking version stays valid and the marker is just a method call, transformation
+can be deferred to runtime and applied only where profiling says it matters — the tiered,
+lazy variant sketched in the design doc.
+
+## See it suspend
+
+`Demo.main` runs six scenarios; scenario 2 completes the futures manually from the main
+thread and renders the suspended machine between steps (via the `$asyncDebug` metadata the
+transform emits per state):
+
+```
+== 2. real suspension, resumed by manual completion on the main thread
+   Samples.sumTwice(...) suspended at state 1 (line 22): fa = CompletableFuture[Not completed, 1 dependents], fb = CompletableFuture[Not completed]
+   Samples.sumTwice(...) suspended at state 2 (line 23): fa = CompletableFuture[Completed normally], fb = CompletableFuture[Not completed, 1 dependents], x = 5
+   result = s:10
+```
+
+Note `x = 5` appearing once state 2 is reached: the spilled frame rendered under source
+names. The demo also dumps every generated class to `target/transformed-classes/` for
+`javap -c -l -p` spelunking.
+
+## The Java agent: the default deployment
 
 ```
 java -javaagent:target/async3-0.1-SNAPSHOT.jar -cp ... your.Main
 ```
 
 At class load — the moment when adding methods is still legal, unlike retransformation — the
-agent gives every method containing await markers two siblings *in the host class itself*:
-`m$asyncBody(FutureStateMachine, Object)` holding the resumable body, and a `m$async` entry
-point that allocates the shared runtime `DelegatingStateMachine` shell bound to the body via
-an `LDC MethodHandle` constant (no per-method class generation at all). The original method is
-untouched — the blocking tier. This is the `externalFsmMethod` shape of the annotation-driven
-frontend, derived at load time.
+agent gives every marked method two siblings *in the host class itself*, with no class
+generation per method at all. The resumable body becomes a private static sibling, and the
+entry point binds the shared runtime shell to it via an `LDC MethodHandle` constant:
 
-Consequences: private access is same-class access (no nestmate machinery); `Async.async` and
-`Async.lift` detect the prepared entries and skip cracking-time transformation entirely; and —
-the headline — **IDE line breakpoints inside lambda bodies and transformed methods bind and
-fire with no shadow naming and no modes**, because the executing bytecode lives in the class
-the source lines belong to. Verified end-to-end by `JdiAgentCheck` against `AgentProbe`
-running under the agent: the hit lands in `lambda$main$...$asyncBody` in the host class, with
-named locals intact. The agent applies to every marked class on the classpath, including code
-you didn't build, and is idempotent with AoT-prepared classes.
+```
+private static void sumTwice$asyncBody(async3.runtime.FutureStateMachine, java.lang.Object);
+
+public static java.util.concurrent.CompletableFuture sumTwice$async(CompletableFuture, CompletableFuture);
+  Code:
+     0: new           #181  // class async3/runtime/DelegatingStateMachine
+     ...
+     8: ldc           #203  // MethodHandle REF_invokeStatic Samples.sumTwice$asyncBody:(LFutureStateMachine;Ljava/lang/Object;)V
+    10: ldc           #205  // String "state 1 (line 22): fa -> refs[0] ... state 2: ... x -> prims[2] (I)"
+    12: invokespecial #189  // DelegatingStateMachine.<init>
+    ...
+    31: invokevirtual #193  // start
+```
+
+Consequences: private access is same-class access (no nestmate machinery), and — the
+headline — **the executing bytecode lives in the class the source lines belong to**, so IDE
+line breakpoints inside lambda bodies and transformed methods bind and fire naturally.
+Running the probe under the agent:
+
+```
+$ java -javaagent:target/async3-0.1-SNAPSHOT.jar -cp ... async3.AgentProbe
+agent entry present: addOne$async
+addOne$async -> 42
+executing in async3.AgentProbe.lambda$main$3db80bdd$1$asyncBody
+iter 0 -> 42
+```
+
+Verified end-to-end by `JdiAgentCheck`, which attaches over JDI, replays IntelliJ's exact
+breakpoint procedure (`classesByName` → `locationsOfLine` → breakpoint), and observes the hit
+landing in the `$asyncBody` sibling — in the host class, named locals intact. A constant-pool
+byte scan pre-filters untouched classes, so the agent is cheap to leave on; it applies to
+every marked class on the classpath, including code you didn't build, and is idempotent with
+AoT-prepared classes.
+
+## The user-facing API
+
+```java
+// async: run a block with awaits in it
+CompletableFuture<Integer> sum = Async.async(() -> {
+    int x = Async.await(la);
+    int y = Async.await(lb);
+    return x + y;
+});
+
+// lift: derive the suspending variant of an existing, ordinary blocking method
+var sumTwice = Async.lift(Samples::sumTwice);
+CompletableFuture<String> r = sumTwice.apply(fa, fb);
+```
+
+Under the agent, both simply bind the prepared `m$async` entry — no work at runtime beyond a
+method-handle lookup. `lift` covers every reference shape through one mechanism (captured and
+applied arguments concatenate into the target's entry locals): static, unbound instance
+(`C::m`), bound instance (`obj::m`), private targets, plain parameterized lambdas. It is the
+runtime analogue of the annotation-driven (Optimus-style) frontend's direct/`$queued` method
+pair (design doc [§4](docs/DESIGN.md#4-the-annotation-driven-frontend-optimus-style),
+[§7.5](docs/DESIGN.md#75-lambda-front-end-prototype-of-the-runtime-triggered-transform)).
+
+**No agent? They still work.** Both APIs fall back to transforming at runtime by *cracking*
+the (serializable) lambda to find the `lambda$...` impl method javac generated, defining the
+state machine as a hidden nestmate of the capturing class. The mechanics, and the IntelliJ
+breakpoint-binding limitation of this path (plus its `-Dasync3.lambda.debuggable=true`
+workaround), are in the design doc's
+[§7.5](docs/DESIGN.md#75-lambda-front-end-prototype-of-the-runtime-triggered-transform);
+under the agent the issue doesn't exist.
 
 ## Debugging in IntelliJ
 
-1. Open `async3.demo.Demo` and **Debug `main()`** (it also works via
-   `mvn -q compile exec:java -Dexec.mainClass=async3.demo.Demo` on the command line).
-2. **Best option — add `-javaagent:target/async3-0.1-SNAPSHOT.jar` to the run configuration's
-   VM options** (run `mvn -q -DskipTests package` first): breakpoints inside lambda bodies and
-   marked methods then bind with no properties and no restrictions (see "Java agent" above).
-3. Without the agent, for the **lambda API** (Demo scenario 0): make sure
-   `-Dasync3.lambda.debuggable=true` is set (Demo sets it programmatically) and put line
-   breakpoints inside the lambda body.
-4. For the class-based samples: set line breakpoints in
-   [Samples.java](src/main/java/async3/samples/Samples.java) inside `sumTwice`, one per line.
+1. `mvn -q -DskipTests package`, then add `-javaagent:target/async3-0.1-SNAPSHOT.jar` to the
+   run configuration's VM options.
+2. Open `async3.demo.Demo`, set line breakpoints anywhere — inside the scenario-0 lambda,
+   inside [`Samples.sumTwice`](src/main/java/async3/samples/Samples.java) — and **Debug
+   `main()`**. Scenario 2 gives a linear, single-threaded story: first hit in state 0; after
+   `fa.complete(5)` the next line's breakpoint hits *inside the resumed state machine* with
+   `x = 5` under its source name in the Variables view.
 
-**Why the lambda case needs its own mode.** IntelliJ resolves a line inside a lambda body only
-against classes named like the *enclosing source class* — javac emits lambda bodies as
-`lambda$...` methods of that very class, so IJ registers an exact-name class-prepare filter
-(no `$*` wildcard as for anonymous classes). A state machine named `Owner$async$lambda$m$0` is
-therefore invisible to the breakpoint, which instead binds into the original — now dead —
-`lambda$` method and never fires. In debuggable mode the state machine is defined **under the
-capturing class's own name** in a throwaway loader; JDI matches class names across loaders, so
-the IDE finds it and the breakpoint binds and fires. Verified with a JDI program
-(`JdiShadowCheck`) that performs exactly IntelliJ's procedure: `classesByName` →
-`locationsOfLine` → breakpoint → hit after a real resume, named locals (`x = 41`) intact.
-The trade-off: inside the shadow class the host's name resolves to the shadow itself, so
-lambdas that reference the host class (captured `this`, same-class helpers, nested lambdas)
-are rejected in this mode with an explanatory error — use the default hidden-nestmate mode for
-those. The clean fix belongs to the compiler/agent integration: emit the resumable body as a
-sibling method *of the capturing class itself* (the `externalFsmMethod` shape), and the whole
-issue disappears.
+What to expect while stepping:
 
-What to expect:
-
-- **Scenario 2** of the demo is the interesting one: the futures are completed manually from
-  the main thread, so each resume runs synchronously on the main thread — a linear,
-  single-threaded debug story. The first breakpoint hits in state 0; after `fa.complete(5)`
-  the breakpoint on the next line hits *inside the resumed state machine*, and the Variables
-  view shows `x = 5` under its source name (the original `LocalVariableTable` is carried over
-  and restores target the original slots).
-- `this` in those frames is the state machine; expand `refs` / `prims` to see the raw spilled
-  frame, or evaluate `async3.runtime.AsyncDebug.describe(this)` in the Evaluate dialog to get
+- `this` in transformed frames is the state machine; expand `refs`/`prims` for the raw
+  spilled frame, or evaluate `async3.runtime.AsyncDebug.describe(this)` to get
   `...sumTwice(...) suspended at state 2 (line 23): fa = ..., x = 5`.
 - **Stepping over an await that actually suspends steps out of the method** — `apply` parks
-  and returns. That is faithful to what the machine does; to follow the logical flow, put a
-  breakpoint on the line after the await (this is the same experience as debugging Kotlin
-  coroutines without their debugger plugin; an IntelliJ plugin that auto-plants those
-  breakpoints is the eventual answer).
-- The demo also dumps all transformed classes to `target/transformed-classes/` for
-  `javap -c -l -p` inspection.
+  and returns. That is faithful to what the machine does; put a breakpoint on the line after
+  the await to follow the logical flow (same experience as Kotlin coroutines without their
+  debugger plugin; an IntelliJ plugin that auto-plants those breakpoints is the eventual
+  answer).
 
-## Layout
+## How it compares
 
-- [`async3.runtime.AsyncRT`](src/main/java/async3/runtime/AsyncRT.java) — the `await` marker; its default implementation blocks ("tier 0").
-  Methods calling it run correctly with no transformation at all.
-- [`async3.runtime.Async`](src/main/java/async3/runtime/Async.java) — the lambda front end (`Async.async(() -> ... Async.await(f) ...)`)
-  via lambda cracking + `defineHiddenClass(NESTMATE)`, with the shadow-named debuggable mode.
-- [`async3.runtime.FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) — state machine base class mirroring the ABI of
-  `scala.tools.testkit.async.AsyncStateMachine`, plus the generic two-array frame
-  (`Object[] refs` / `long[] prims`) used for captured locals and operand stack.
-- [`async3.samples.Samples`](src/main/java/async3/samples/Samples.java) — source-shape methods (plain synchronous Java calling `await`).
-- [`async3.samples.HandWrittenSumTwice`](src/main/java/async3/samples/HandWrittenSumTwice.java) — Phase 0: the expected transform output, by hand.
-- [`async3.transform.AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) — Phase 1: the ASM transform. Derives a
-  `<name>$async` entry point + `Owner$async$<name>$i` state machine class per marked method;
-  leaves the original method untouched as the synchronous tier.
-- [`async3.agent.AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) — the Java agent that prepares resumable siblings at class-load time.
-- [`async3.demo.Demo`](src/main/java/async3/demo/Demo.java) — runnable demo exercising the lambda API, lift API, and agent path.
-- [`src/test/java`](src/test/java) — semantic equivalence matrix (fast path vs. real suspension), rejection
-  tests (monitors, uninitialized `new` across a suspension), debug-metadata check.
+| System | Transform level | Suspension mechanism | vs. async3 |
+|---|---|---|---|
+| **Project Loom** (JDK 21+) | VM-internal (native stack copying) | Block on a virtual thread | Zero code changes, but JDK 21+ only; pinning in `synchronized`; collapses fork/join into sequential blocking — Optimus-style graph schedulers lose the dataflow graph |
+| **Kotlin coroutines** | Compiler backend (bytecode-level IR) | CPS; spills to typed fields of a generated `Continuation` class | Closest relative. Kotlin generates a class per coroutine; async3's generic two-array frame works identically at compile time and at runtime without per-method class generation |
+| **scala-async / `AsyncPhase`** | Compiler, on typed trees | ANF + lifting into a state-machine class | The predecessor this project aims to replace. The tree-level complexity (ANF, symbol re-ownership, patmat interaction, value-class boxing) disappears at bytecode level |
+| **Quasar** | Agent / AoT ASM | Generic `Stack` (`long[]` + `Object[]`) | Same frame representation. Quasar is unmaintained and agent/AoT-only; async3 adds the runtime-triggered path (cracking + `defineHiddenClass`) and profile-driven tiering |
+| **Kilim / Javaflow** | AoT ASM | Stack capture via rewriting | Same family; Javaflow documents the uninitialized-object problem async3 solves with NEW-sinking |
+
+The design doc's [§7](docs/DESIGN.md#7-the-runtime-deferred-tiered-variant) answers the Loom
+question in depth — the short version: this *is* userland Loom, and earns its keep where
+Loom's thread semantics don't fit, the sharpest case being fork/join dataflow that a graph
+scheduler needs to see rather than block on.
 
 ## Status
 
-Working: suspension with non-empty operand stacks, loops, try/catch (failed futures reach the
-user's handler), two-slot primitives, `new Foo(await(f))` via Kotlin-style NEW-sinking
-(`sinkUninitializedNews`, including nested/conditional/statement shapes), per-state
-`$asyncDebug` frame metadata with source variable names, `AsyncDebug.describe` for rendering
-suspended frames, and the original `LocalVariableTable`/line numbers carried into the
-generated `apply` (restores target the original slots, so a debugger sees named locals).
+**Working:** suspension with non-empty operand stacks (`1 + (2 * await(f)) + mul(await(g), 3)`
+— the case the tree-level ANF transform exists to forbid); loops; try/catch (failed futures
+reach the user's handler); two-slot primitives; `new Foo(await(f))` via Kotlin-style
+NEW-sinking (nested/conditional/statement shapes); instance methods (`this` is just entry
+local 0; the state machine joins the host's nest for private access); per-state `$asyncDebug`
+frame metadata; `AsyncDebug.describe`; LVT/line-number carry-over; the agent, the
+`async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging.
+52 tests, including a semantic matrix running every sample blocking vs. transformed, fast
+path vs. real suspension.
 
-Instance methods are supported: `this` is just the entry local in slot 0, captured like any
-other value, and the generated state machine joins the host class's **nest** so private
-field/method access in the transformed body keeps working.
+**Rejected with diagnostics** (rather than miscompiled): await under a monitor, await in
+constructors.
 
-The lambda front end works end-to-end: cracking, hidden-nestmate definition (private state of
-the capturing class accessible across suspension points), constructor caching, and the
-shadow-named debuggable mode with JDI-verified breakpoint binding. `Async.lift(C::m)` lifts
-named methods (static, unbound, bound, cross-class) into their suspending variants. The Java
-agent provides the in-place shape — resumable body as a sibling of the host class — with
-JDI-verified, restriction-free debugging, and is preferred automatically by `async`/`lift`.
+**Not yet:** liveness-based spilling (currently spills all assigned locals); the lazy
+`invokedynamic`/`MutableCallSite` tier switch; JMH numbers. See the design doc's phase list.
 
-## Comparison with related systems
+## Layout
 
-See [docs/DESIGN.md](docs/DESIGN.md) for full design notes. A brief comparison:
-
-| System | Transform level | Suspension mechanism | Key trade-offs vs. async3 |
-|---|---|---|---|
-| **Project Loom** (JDK 21+) | VM-internal (native stack copying) | Block on a virtual thread; the runtime unmounts the carrier thread | Zero code changes, but JDK 21+ only; no Scala.js/Native; virtual-thread pinning in `synchronized`; collapses fork/join into sequential blocking — Optimus-style graph schedulers lose visibility into the dataflow graph |
-| **Kotlin coroutines** | Compiler backend (bytecode-level IR) | CPS transform; spills to named fields of a generated `Continuation` class | Closest relative — same bytecode-level approach. Kotlin generates a class per coroutine with typed fields; async3 uses a generic two-array frame (`long[]` + `Object[]`) so the transform works identically at compile time and at runtime without class generation per method |
-| **scala-async / `AsyncPhase`** | Compiler, on typed trees | ANF + lifting into state-machine wrapper class | The predecessor this project aims to replace. Tree-level work is inherently complex (ANF, symbol re-ownership, patmat interaction, value-class boxing). At bytecode level all of that disappears — locals are numbered slots, pattern matches are already branches, `finally` is already duplicated |
-| **Quasar** | Java agent / AoT ASM instrumentation | Generic `Stack` (`long[]` + `Object[]`) | Same frame representation as async3. Quasar requires ahead-of-time or agent instrumentation and is no longer maintained; async3 adds a runtime-triggered path (lambda cracking / `defineHiddenClass`) and profile-driven tiering |
-| **Kilim / Apache Javaflow** | AoT ASM instrumentation | Stack capture via bytecode rewriting | Same family as Quasar; Javaflow documents the uninitialized-object problem that async3 solves with Kotlin-style NEW-sinking |
-
-**In short:** Loom is the zero-effort baseline on JDK 21+ but doesn't cover non-JVM targets,
-pre-21 JVMs, or runtimes that need explicit fork/join scheduling. Kotlin coroutines validate
-the bytecode-level approach; async3 applies the same idea to Scala's existing async ABI with a
-generic frame that enables runtime-deferred ("tiered") transformation — run the blocking
-version first, swap in the suspendable one when profiling says it matters.
-
-## Current limitations
-
-Awaits in constructors are rejected; methods of inner classes (host not its own nest host)
-lose private-member access from the transformed body; spills all assigned locals rather than
-only live ones; no lazy/`invokedynamic` tier switch yet; no JMH numbers yet (deferred). See
-the design doc's phase list.
+| | |
+|---|---|
+| [`runtime/AsyncRT`](src/main/java/async3/runtime/AsyncRT.java) | the `await` marker; default implementation blocks (tier 0) |
+| [`runtime/Async`](src/main/java/async3/runtime/Async.java) | lambda front end (cracking + `defineHiddenClass(NESTMATE)`), `lift`, shadow mode |
+| [`runtime/FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) | state machine base; ABI mirrors `scala.tools.testkit.async.AsyncStateMachine`; the `refs`/`prims` frame |
+| [`transform/AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) | the ASM transform: class-per-method shape and the agent's in-place sibling shape |
+| [`agent/AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) | load-time agent (`Premain-Class` in the jar manifest) |
+| [`samples/`](src/main/java/async3/samples) | source-shape inputs; [`HandWrittenSumTwice`](src/main/java/async3/samples/HandWrittenSumTwice.java) is the expected output, by hand (phase 0) |
+| [`demo/Demo`](src/main/java/async3/demo/Demo.java) | the runnable walkthrough above |
+| [`src/test/java`](src/test/java) | semantic matrix, rejection tests, JDI breakpoint checks (`JdiAgentCheck`, `JdiShadowCheck`) |
