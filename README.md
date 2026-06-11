@@ -245,6 +245,19 @@ path vs. real suspension.
 **Rejected with diagnostics** (rather than miscompiled): await under a monitor, await in
 constructors.
 
+## Layout
+
+| | |
+|---|---|
+| [`runtime/AsyncRT`](src/main/java/async3/runtime/AsyncRT.java) | the `await` marker; default implementation blocks (tier 0) |
+| [`runtime/Async`](src/main/java/async3/runtime/Async.java) | lambda front end (cracking + `defineHiddenClass(NESTMATE)`), `lift`, shadow mode |
+| [`runtime/FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) | state machine base; ABI mirrors `scala.tools.testkit.async.AsyncStateMachine`; the `refs`/`prims` frame |
+| [`transform/AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) | the ASM transform: class-per-method shape and the agent's in-place sibling shape |
+| [`agent/AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) | load-time agent (`Premain-Class` in the jar manifest) |
+| [`samples/`](src/main/java/async3/samples) | source-shape inputs; [`HandWrittenSumTwice`](src/main/java/async3/samples/HandWrittenSumTwice.java) is the expected output, by hand (phase 0) |
+| [`demo/Demo`](src/main/java/async3/demo/Demo.java) | the runnable walkthrough above |
+| [`src/test/java`](src/test/java) | semantic matrix, rejection tests, JDI breakpoint checks (`JdiAgentCheck`, `JdiShadowCheck`) |
+
 ## Future work
 
 - **Spill-store elision** — dead ref slots are already nulled rather than spilled; the
@@ -268,17 +281,21 @@ constructors.
   auto-plant resume breakpoints for logical step-over and render suspended state machines as
   async stack frames.
 
+Two applications (Java, Akka) that exploit what this transform does and Loom does not —
+suspend against a *custom scheduler* with a *serializable frame* rather than parking a thread:
+
+- **Durable workflows (Akka SDK).** An Akka SDK `Workflow` is a hand-written state machine
+  today — named steps, typed transitions, an explicit state class. The spilled frame
+  (`refs`/`prims` + `state`) *is* a durable snapshot: write the workflow as straight-line
+  `await` code, persist the frame at each suspension, resume across restart/rebalance
+  (Temporal/DBOS-style durable execution). A parked virtual thread can't be serialized, so
+  Loom doesn't reach this.
+- **`await` inside a typed actor (Akka).** The ask-within-actor dance — a response-wrapper
+  message, a `become`/stash continuation, a second handler — is exactly the continuation this
+  transform generates. With the mailbox+dispatcher as the scheduler, `await(ask(...))`
+  suspends the *actor*, not a dispatcher thread, buffering messages per a declared policy and
+  resuming in-context with ordering intact, where blocking a virtual thread would block the
+  actor's single logical thread. The bytecode transform is identical to the workflow case; an
+  annotation only selects which scheduler the suspension targets (journal vs. mailbox).
+
 See the design doc's [phase list](docs/DESIGN.md#8-prototype-plan) for the full plan.
-
-## Layout
-
-| | |
-|---|---|
-| [`runtime/AsyncRT`](src/main/java/async3/runtime/AsyncRT.java) | the `await` marker; default implementation blocks (tier 0) |
-| [`runtime/Async`](src/main/java/async3/runtime/Async.java) | lambda front end (cracking + `defineHiddenClass(NESTMATE)`), `lift`, shadow mode |
-| [`runtime/FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) | state machine base; ABI mirrors `scala.tools.testkit.async.AsyncStateMachine`; the `refs`/`prims` frame |
-| [`transform/AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) | the ASM transform: class-per-method shape and the agent's in-place sibling shape |
-| [`agent/AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) | load-time agent (`Premain-Class` in the jar manifest) |
-| [`samples/`](src/main/java/async3/samples) | source-shape inputs; [`HandWrittenSumTwice`](src/main/java/async3/samples/HandWrittenSumTwice.java) is the expected output, by hand (phase 0) |
-| [`demo/Demo`](src/main/java/async3/demo/Demo.java) | the runnable walkthrough above |
-| [`src/test/java`](src/test/java) | semantic matrix, rejection tests, JDI breakpoint checks (`JdiAgentCheck`, `JdiShadowCheck`) |
