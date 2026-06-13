@@ -394,10 +394,11 @@ footer .links a{margin:0 14px}
 <nav>
   <a class="brand" href="#"><b>async3</b> · bytecode async/await</a>
   <span class="links">
-    <a href="#machine">demo</a>
-    <a href="#trick">how</a>
+    <a href="#split">split</a>
+    <a href="#machine">transform</a>
+    <a href="#tiers">deploy</a>
+    <a href="#elevate">seam</a>
     <a href="#compare">vs</a>
-    <a href="#elevate">elevate</a>
     <a href="https://github.com/retronym/async3">github</a>
   </span>
 </nav>
@@ -417,8 +418,21 @@ footer .links a{margin:0 14px}
 
 <div class="marquee"><div class="track" id="marq"></div></div>
 
+<section id="split" style="padding-top:72px">
+  <div class="sec-label">the split</div>
+  <h2>Two concerns, kept apart.</h2>
+  <p class="lede"><b style="color:var(--amber)">① The transform</b> turns <i>one</i> suspending method
+  into a re-entrant state machine — a pure bytecode rewrite that knows nothing about deployment.
+  <b style="color:var(--amber)">② Deployment</b> decides <i>when</i> it runs, <i>where</i> the output
+  lives, and <i>how</i> a caller reaches the suspending variant — ahead of time, at class load, or
+  lazily when a path runs hot. They meet at one <b style="color:var(--teal)">seam</b>: the transform
+  <i>rewires calls</i> — a call to something that itself suspends becomes a suspension point — and the
+  shape of that edge (a sibling method, or a runtime call site) is the one transform choice forced by
+  deployment. Everything below is one of those three.</p>
+</section>
+
 <section id="machine">
-  <div class="sec-label">01 · the demo</div>
+  <div class="sec-label">01 · concern ① · the transform</div>
   <h2>One method, three views, zero hand-waving.</h2>
   <p class="lede">This is <code>Samples.sumTwice</code> from the repo, replaying <b>scenario 2 of <code>Demo.main</code></b>:
   two sequential awaits, futures completed manually from the main thread. Left is what you wrote.
@@ -487,7 +501,7 @@ footer .links a{margin:0 14px}
 </section>
 
 <section id="trick">
-  <div class="sec-label">02 · the trick</div>
+  <div class="sec-label">02 · concern ① · inside the transform</div>
   <h2>Most of the machinery has no reason to exist.</h2>
   <p class="lede">Scala's tree-level async phase needs an ANF transform, live-variable analysis and
   symbol lifting. At the <b>bytecode</b> level, locals are numbered slots, pattern matches are already
@@ -536,8 +550,13 @@ footer .links a{margin:0 14px}
 </section>
 
 <section id="tiers">
-  <div class="sec-label">04 · deployment</div>
+  <div class="sec-label">04 · concern ② · deployment</div>
   <h2>An agent at class load. <br>A fallback when there isn't one.</h2>
+  <p class="lede">Same transform, different <i>trigger × location × how the caller reaches it</i>:
+  ahead-of-time (a generated class), <b>at class load</b> (the agent — siblings in your own class),
+  at first use (cracking a lambda into a hidden class), or per-receiver at a call site (next section).
+  What's generated never changes — only when it runs and where it lives. The two that need no build
+  step:</p>
   <div class="tiers">
     <div class="tier hot">
       <div class="tag">the default — java agent</div>
@@ -568,13 +587,16 @@ CompletableFuture&lt;Integer&gt; s = Async.<span style="color:var(--amber)">asyn
 </section>
 
 <section id="elevate">
-  <div class="sec-label">05 · elevation</div>
+  <div class="sec-label">05 · the seam · transform ⋈ deployment</div>
   <h2>When the blocking is one call away.</h2>
-  <p class="lede">The agent finds <code>await</code> markers. But a method can block <b>without one</b> — by
-  <i>calling</i> a method that awaits. <code>indirect</code> below has no <code>await</code> of its own, yet it
-  blocks on <code>leaf</code>. <b>Elevating the blocking tier</b> gives it a suspending sibling too: every call
-  to a suspendable method is rewritten <code>g(…)</code> → <code>await(g$async(…))</code>, and the
-  suspension propagates up the call chain to the async boundary.</p>
+  <p class="lede">Here the two concerns touch. The transform finds <code>await</code> markers — but a
+  method can block <b>without one</b>, by <i>calling</i> a method that awaits. <code>indirect</code>
+  below has no <code>await</code> of its own, yet it blocks on <code>leaf</code>. So the transform
+  <b>rewires the call into a suspension point</b>: <code>g(…)</code> → <code>await(g$async(…))</code>.
+  The <i>shape</i> of that rewired edge is the seam — a direct sibling call when dispatch is static
+  (deployment must have materialized <code>g$async</code>), or a runtime call site when it's virtual
+  (deployment resolves it per receiver, and the witness flips it when hot). The three panels below
+  walk those three edge shapes.</p>
 
   <div class="elev">
     <div class="panel">

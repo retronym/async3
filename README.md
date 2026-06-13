@@ -11,15 +11,28 @@ Plain Java + ASM, no dependency on the Scala build. Design rationale, prior art,
 phased plan: [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
-mvn test                                              # 52 tests
+mvn test                                              # 65 tests
 mvn -q compile exec:java -Dexec.mainClass=async3.demo.Demo
 ```
 
-## The idea in one method
+## Two orthogonal concerns
 
-You write an ordinary, synchronous method. `await` is a real static method whose default
-implementation just blocks — so this code runs correctly, as-is, with no transformation
-("tier 0"):
+async3 keeps two things apart on purpose, and this README follows the split:
+
+- **The transform** — turning *one* method that suspends into a re-entrant state machine. A pure
+  bytecode rewrite that knows nothing about how it is deployed.
+- **Deployment** — *when* the transform runs, *where* its output lives, and *how* a caller reaches
+  the suspending variant: ahead-of-time, at class load (the agent), or lazily at runtime; eagerly,
+  or only where profiling says a path is hot.
+
+They meet at one **seam**: the transform *rewires calls* — a call to a method that itself suspends
+becomes a suspension point — and the shape of that rewired edge (a sibling method vs. a runtime call
+site) is the single transform decision forced by a deployment constraint.
+
+## The contract: a marker that blocks (tier 0)
+
+`await` is a real static method whose default implementation just blocks — so this code runs
+correctly, as-is, with no transformation at all ("tier 0"):
 
 ```java
 public static String sumTwice(CompletableFuture<Integer> fa, CompletableFuture<String> fb) {
@@ -29,8 +42,15 @@ public static String sumTwice(CompletableFuture<Integer> fa, CompletableFuture<S
 }
 ```
 
-The ASM transform leaves that method byte-identical and derives a suspending sibling next to
-it. `javap` on the transformed class:
+`AsyncRT.await` is the whole contract on the source side; `FutureStateMachine` — the `state`
+register, `getCompleted`/`onComplete`/`tryGet`, and the generic `refs[]`/`prims[]` frame — is the
+contract the generated code targets. Both concerns below stand on the fact that the untransformed
+method already works.
+
+## Concern 1 · the transform — one method, one state machine
+
+The ASM transform leaves `sumTwice` byte-identical and derives a suspending sibling next to it.
+`javap` on the transformed class:
 
 ```
 public static java.util.concurrent.CompletableFuture sumTwice$async(CompletableFuture, CompletableFuture);
@@ -87,11 +107,18 @@ LocalVariableTable:
     232      20     5     s   Ljava/lang/String;
 ```
 
-Because the blocking version stays valid and the marker is just a method call, transformation
-can be deferred to runtime and applied only where profiling says it matters — the tiered,
-lazy variant sketched in the design doc.
+**A suspension point is not only an `await` marker.** The transform also *rewires calls to
+suspendable callees into suspension points*: `g(args)` becomes `await(g$async(args))`, coerced back
+to `g`'s return type — so a method with no `await` of its own still becomes a state machine when it
+calls one that does. The transform is parameterized by exactly this — *which* call edges to rewire,
+and *what shape* of entry to rewire them to — and is otherwise self-contained: the same machinery
+serves every deployment below. (That parameter is [the seam](#the-seam-the-transform-rewires-calls-deployment-resolves-them).)
 
-## See it suspend
+It handles the bytecode corners the tree-level ANF transform exists to forbid: a non-empty operand
+stack at the await (`1 + (2 * await(f)) + mul(await(g), 3)`), loops, try/catch/finally, two-slot
+primitives, and `new Foo(await(f))` via NEW-sinking.
+
+### See it suspend
 
 `Demo.main` runs six scenarios; scenario 2 completes the futures manually from the main
 thread and renders the suspended machine between steps (via the `$asyncDebug` metadata the
@@ -109,7 +136,23 @@ only `fb` (`fa` was consumed by the first await and its slot is already nulled);
 only `x`. The demo also dumps every generated class to `target/transformed-classes/` for
 `javap -c -l -p` spelunking.
 
-## The Java agent: the default deployment
+## Concern 2 · deployment — when the transform runs, and how callers reach it
+
+The *same* single-method transform is deployed five ways. They differ only in *trigger × where the
+output lives × how the caller reaches the suspending variant* — never in what gets generated:
+
+| deployment | trigger | output lives | caller reaches it via |
+|---|---|---|---|
+| AoT, class-per-method | build time | a generated state-machine class | a linked `m$async` entry |
+| **load-time agent** (the default) | class load | **in the host class** — `m$asyncBody` + `m$async` siblings | the in-host `m$async` |
+| runtime `async`/`lift` fallback | first use | a hidden `NESTMATE` class | cracked lambda → cached handle |
+| Strategy-B call site | first virtual call | a hidden class, per receiver | an `invokedynamic` that resolves the actual receiver |
+| dynamic tier flip | hotness (a `StackWalker` witness) | (as above) | a call site that starts blocking, flips when hot |
+
+The first four are about *materializing* the transform; the last is about *scheduling* it in time.
+"Tier 0 vs. tier 1" is a deployment property — the transform is identical across the whole table.
+
+### The default: the load-time agent
 
 ```
 java -javaagent:target/async3-0.1-SNAPSHOT.jar -cp ... your.Main
@@ -154,7 +197,7 @@ byte scan pre-filters untouched classes, so the agent is cheap to leave on; it a
 every marked class on the classpath, including code you didn't build, and is idempotent with
 AoT-prepared classes.
 
-## The user-facing API
+### The user-facing API
 
 ```java
 // async: run a block with awaits in it
@@ -192,6 +235,32 @@ the one method, and define the state machine — so a class with N async lambdas
 times without the agent, once per lambda, first use only. The agent inverts this: one parse
 per class at load time prepares all N methods, and the runtime tier never reads bytecode at
 all.
+
+## The seam: the transform rewires calls, deployment resolves them
+
+The transform chooses the *shape* of each rewired call edge, but the choice is dictated by a
+deployment fact — this is the one place the two concerns are coupled:
+
+- **Statically-bound callee** → a direct `invoke g$async`. This only links if `g$async` already
+  exists, so it is sound only under a deployment that materializes the whole same-class sibling set
+  (the agent, or AoT) — hence the transform restricts direct rewiring to same-class targets.
+- **Virtually-dispatched callee** (an interface or overridable method) → an `invokedynamic`.
+  Deployment-agnostic: the bootstrap ([`Elevation`](src/main/java/async3/runtime/Elevation.java))
+  resolves the *actual receiver's* method and transforms it on demand, so nothing need pre-exist.
+  That is why virtual elevation lives at the call site, not in the callee hierarchy, and stays sound
+  under overriding (an override that doesn't await transforms to a do-nothing state machine; one
+  that does, suspends).
+- **The tier flip closes the loop.** A virtual call site starts on the blocking tier; the blocking
+  `await` profiles itself with a `StackWalker` sample
+  ([`Profiler`](src/main/java/async3/runtime/Profiler.java)) and the site flips to the transform
+  once the method is hot. On flip the transform re-runs *with rewiring on*, so the new machine's own
+  virtual calls become further call sites; and the witness counts the whole blocking chain, so a
+  deeper caller goes hot and flips too. The transform keeps emitting edges; deployment keeps
+  resolving them, one level per hot witness.
+
+Design doc: [§7.7](docs/DESIGN.md#77-elevating-the-blocking-tier-transitive-suspension) /
+[§7.8](docs/DESIGN.md#78-elevating-through-virtual-dispatch-strategy-b--implemented) /
+[§7.9](docs/DESIGN.md#79-the-witness-driven-tier-flip-stackwalker--implemented).
 
 ## Debugging in IntelliJ
 
@@ -238,15 +307,11 @@ local 0; the state machine joins the host's nest for private access); liveness-d
 of dead ref slots (a suspended frame pins only what the resumed code can still read — the
 analogue of scala-async's `fieldsToNullOut`); per-state `$asyncDebug`
 frame metadata; `AsyncDebug.describe`; LVT/line-number carry-over; the agent, the
-`async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging;
-**transitive elevation** — a method that blocks only because it calls a suspendable sibling
-(no `await` of its own) gets a suspending `$async` variant too, the agent rewriting
-`invoke g` to `await(g$async(...))` for every suspendable same-class callee — directly for
-statically bound calls, and through a per-receiver `invokedynamic` call site for virtual/interface
-dispatch (sound under overriding, no scaffolding on the callee hierarchy); and a **witness-driven
-tier flip** — the blocking `await` profiles itself with a `StackWalker` sample, and the virtual call
-site starts blocking and flips to a suspending state machine once the awaiting method is hot. The
-"elevate the blocking tier" design: docs/DESIGN.md [§7.7](docs/DESIGN.md#77-elevating-the-blocking-tier-transitive-suspension)/[§7.8](docs/DESIGN.md#78-elevating-through-virtual-dispatch-strategy-b--implemented)/[§7.9](docs/DESIGN.md#79-the-witness-driven-tier-flip-stackwalker--implemented).
+`async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging; and the
+full elevation/tiering story across [the seam](#the-seam-the-transform-rewires-calls-deployment-resolves-them)
+— transitive elevation (a method that only blocks indirectly gets a suspending variant too),
+per-receiver `invokedynamic` for virtual/interface dispatch (sound under overriding), and the
+`StackWalker`-witnessed tier flip with chain elevation (a hot blocking chain suspends end-to-end).
 65 tests, including a semantic matrix running every sample blocking vs. transformed, fast
 path vs. real suspension.
 
@@ -262,7 +327,7 @@ constructors.
 | [`runtime/Elevation`](src/main/java/async3/runtime/Elevation.java) | Strategy-B call site: `invokedynamic` bootstrap resolving the suspending entry per actual receiver; starts blocking, flips when hot |
 | [`runtime/Profiler`](src/main/java/async3/runtime/Profiler.java) | the witness: `StackWalker` sample from the blocking `await` slow path; counts blocks per method, marks hot |
 | [`runtime/FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) | state machine base; ABI mirrors `scala.tools.testkit.async.AsyncStateMachine`; the `refs`/`prims` frame |
-| [`transform/AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) | the ASM transform: class-per-method shape and the agent's in-place sibling shape |
+| [`transform/AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) | **the transform** (concern 1): single-method state machine + call rewiring (`elevate`); plus the deployment shapes it emits into — class-per-method, the agent's in-place siblings, and the runtime `transformMethod`/`transformMethodElevated` |
 | [`agent/AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) | load-time agent (`Premain-Class` in the jar manifest) |
 | [`samples/`](src/main/java/async3/samples) | source-shape inputs; [`HandWrittenSumTwice`](src/main/java/async3/samples/HandWrittenSumTwice.java) is the expected output, by hand (phase 0) |
 | [`demo/Demo`](src/main/java/async3/demo/Demo.java) | the runnable walkthrough above |
@@ -273,10 +338,12 @@ constructors.
 - **Spill-store elision** — dead ref slots are already nulled rather than spilled; the
   remaining (purely throughput) refinement is skipping the stores and restores for dead prim
   slots too. Measure with the JMH work below before bothering.
-- **The lazy tier switch** — `invokedynamic`/`MutableCallSite` dispatch that starts on the
-  blocking tier and flips to the transformed version when profiling says hot-and-blocking
-  (design doc [§7](docs/DESIGN.md#7-the-runtime-deferred-tiered-variant)); the agent already
-  materializes the method pair this needs.
+- **Completing the tier switch** — the witness-driven flip exists for virtual call sites
+  ([the seam](#the-seam-the-transform-rewires-calls-deployment-resolves-them)); still open are
+  *de-elevation* when a path cools (the flip is one-way today), the same blocking-start flip on the
+  statically bound `g$async` path (needs an indy there too), and `Can-Retransform-Classes` on the
+  agent to rewire *already-loaded* caller bodies rather than relying on the caller being elevated at
+  load.
 - **JMH numbers** — blocking vs. AoT-transformed vs. lazily flipped vs. the current compiler
   phase's output; generic two-array frame vs. Kotlin-style typed fields.
 - **IDE debugger support** — the remaining stepping gap (step-over at a real suspension steps
