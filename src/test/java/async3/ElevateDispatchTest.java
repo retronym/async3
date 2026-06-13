@@ -72,7 +72,7 @@ class ElevateDispatchTest {
         assertEquals(210, blockingVia(c, inst, "callsFinal", done(5)));   // (5 + 100) * 2
         assertEquals(210, asyncVia(c, inst, "callsFinal", later(5)));
         assertEquals(210, blockingVia(c, inst, "callsVirtual", done(5)));
-        assertEquals(210, asyncVia(c, inst, "callsVirtual", later(5)));   // suspends through vleaf, same answer
+        assertEquals(210, asyncVia(c, inst, "callsVirtual", later(5)));   // elevated through vleaf, same answer
     }
 
     /**
@@ -97,7 +97,7 @@ class ElevateDispatchTest {
         Class<?> impl = Class.forName(IfaceSamples.Impl.class.getName(), true, loader);
         Object i = newInstance(impl);
         assertEquals(60, blockingVia(impl, i, "indirect", done(5)));        // (await(5)+1) * 10
-        assertEquals(60, asyncVia(impl, i, "indirect", later(5)));          // suspends through the default leaf
+        assertEquals(60, asyncVia(impl, i, "indirect", later(5)));          // resolves the default leaf (see DynamicElevationTest for the tier flip)
 
         Class<?> ovr = Class.forName(IfaceSamples.OverridingImpl.class.getName(), true, loader);
         Object o = newInstance(ovr);

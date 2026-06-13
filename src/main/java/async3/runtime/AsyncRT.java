@@ -24,6 +24,10 @@ public final class AsyncRT {
      * where {@code tryGet} rethrows the failure at the suspension point.
      */
     public static <T> T await(CompletableFuture<T> future) {
+        // The blocking await profiles itself: a not-yet-complete future means a real carrier block
+        // is imminent, so witness the awaiting frame (StackWalker) before parking. When that frame
+        // turns out hot, Elevation flips it to a suspending state machine on its next call.
+        if (!future.isDone()) Profiler.observeBlock();
         try {
             return future.join();
         } catch (CompletionException e) {

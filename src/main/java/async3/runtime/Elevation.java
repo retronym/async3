@@ -8,7 +8,9 @@ import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -32,6 +34,16 @@ import java.util.concurrent.CompletableFuture;
  * hierarchy is untouched (no {@code g$async} members, no annotations). Limitation: the per-receiver
  * transform is single-method (it elevates {@code g}'s own awaits, not transitive blocking inside
  * {@code g}); that is the same scope as {@link Async#lift}, and a deeper closure is future work.
+ *
+ * <p><b>Dynamic tier flip.</b> Each per-receiver {@code Site} starts on the <em>blocking</em> tier:
+ * it just invokes the real {@code g} (whose own awaits block the carrier thread), so the
+ * state-machine cost is not paid until it is worth paying. {@link Profiler}, fed by the blocking
+ * {@link AsyncRT#await}, witnesses which methods actually block; when {@code g} crosses the hot
+ * threshold the {@code Site} flips to the suspending transform on its next call. The two tiers are
+ * result-equivalent — flipping only changes whether a not-yet-complete await parks the thread or
+ * releases it. This is the userland-Loom tiering of docs/DESIGN.md §7.7, here keyed to the call
+ * site; there is no on-stack replacement, so a call already blocked stays blocked and only
+ * subsequent calls suspend.
  */
 public final class Elevation {
     private Elevation() {}
@@ -66,8 +78,8 @@ public final class Elevation {
         private final MethodHandles.Lookup caller;
         private final String name;
         private final String blockingDesc;
-        private final ClassValue<MethodHandle> perReceiver = new ClassValue<>() {
-            @Override protected MethodHandle computeValue(Class<?> rc) { return buildInvoker(rc); }
+        private final ClassValue<Site> perReceiver = new ClassValue<>() {
+            @Override protected Site computeValue(Class<?> rc) { return new Site(rc); }
         };
 
         CallCtx(MethodHandles.Lookup caller, String name, String blockingDesc) {
@@ -77,19 +89,67 @@ public final class Elevation {
         }
 
         /** {@code all = [receiver, args...]}; dispatch on the receiver's runtime class. */
-        @SuppressWarnings("unchecked")
         CompletableFuture<Object> dispatch(Object[] all) throws Throwable {
-            return (CompletableFuture<Object>) perReceiver.get(all[0].getClass()).invoke(all);
+            return perReceiver.get(all[0].getClass()).invoke(all);
         }
 
-        /** Build, once per receiver class, an {@code (Object[] all) -> CompletableFuture} invoker. */
-        private MethodHandle buildInvoker(Class<?> rc) {
-            try {
-                ClassLoader loader = rc.getClassLoader();
-                MethodType blocking = MethodType.fromMethodDescriptorString(blockingDesc, loader);
-                Method target = rc.getMethod(name, blocking.parameterArray());
-                Class<?> decl = target.getDeclaringClass();   // where the body to transform lives
+        /**
+         * One per receiver class: starts on the blocking tier and flips to a suspending state
+         * machine the first time the {@link Profiler} reports its target method hot. The two tiers
+         * are result-equivalent; the flip only changes whether a not-yet-complete await parks the
+         * carrier thread (blocking) or releases it (suspending).
+         */
+        private final class Site {
+            private final String key;            // Profiler key: class.name+descriptor
+            private final Method target;         // the actual resolved method on this receiver class
+            private final Class<?> decl;         // where the body to transform/run lives
+            private volatile MethodHandle suspending;
+            private volatile boolean elevated;
 
+            Site(Class<?> rc) {
+                try {
+                    MethodType blocking = MethodType.fromMethodDescriptorString(blockingDesc, rc.getClassLoader());
+                    this.target = rc.getMethod(name, blocking.parameterArray());
+                    this.decl = target.getDeclaringClass();
+                    this.key = decl.getName() + "." + name + blockingDesc;
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException("cannot resolve " + rc.getName() + "." + name + blockingDesc, e);
+                }
+            }
+
+            @SuppressWarnings("unchecked")
+            CompletableFuture<Object> invoke(Object[] all) throws Throwable {
+                if (!elevated && Profiler.isHot(key)) elevate();
+                if (elevated) return (CompletableFuture<Object>) suspending.invoke(all);
+                return blockingInvoke(all);
+            }
+
+            /** Tier 0: run the real method on the calling thread; its own awaits block (and profile). */
+            private CompletableFuture<Object> blockingInvoke(Object[] all) {
+                try {
+                    Object result = target.invoke(all[0], Arrays.copyOfRange(all, 1, all.length));
+                    return CompletableFuture.completedFuture(result);
+                } catch (InvocationTargetException e) {
+                    CompletableFuture<Object> f = new CompletableFuture<>();
+                    f.completeExceptionally(e.getCause());   // failed future == await rethrow semantics
+                    return f;
+                } catch (IllegalAccessException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+
+            private synchronized void elevate() {
+                if (elevated) return;
+                suspending = buildSuspending(decl);
+                elevated = true;
+                Profiler.recordElevation();
+            }
+        }
+
+        /** Transform {@code decl}'s {@code name+blockingDesc} into a suspending {@code (Object[]) -> CF} invoker. */
+        private MethodHandle buildSuspending(Class<?> decl) {
+            try {
+                ClassLoader loader = decl.getClassLoader();
                 byte[] declBytes;
                 try (InputStream in = loader.getResourceAsStream(decl.getName().replace('.', '/') + ".class")) {
                     if (in == null) throw new IllegalStateException("cannot read bytecode of " + decl);
@@ -106,8 +166,7 @@ public final class Elevation {
                         ctor.asType(ctor.type().changeReturnType(FutureStateMachine.class)), START);
                 return inv.asType(inv.type().generic()).asSpreader(Object[].class, inv.type().parameterCount());
             } catch (Throwable t) {
-                throw new IllegalStateException(
-                        "elevation failed for " + rc.getName() + "." + name + blockingDesc, t);
+                throw new IllegalStateException("elevation failed for " + decl.getName() + "." + name + blockingDesc, t);
             }
         }
     }
