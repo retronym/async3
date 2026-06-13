@@ -286,6 +286,64 @@ h2{font-family:var(--serif);font-style:italic;font-weight:400;font-size:clamp(30
 }
 .tier pre .cm{color:var(--faint)}
 
+/* ---- elevation ---- */
+.elev{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:46px;align-items:stretch}
+.elev .panel{border:1px solid var(--line);background:var(--panel);padding:22px 24px}
+.elev .panel.after{border-color:var(--amber-dim);background:linear-gradient(180deg,rgba(255,180,84,.04),var(--panel) 60%)}
+.elev .lbl2{font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-bottom:14px}
+.elev .panel.after .lbl2{color:var(--amber)}
+.elev pre{font-size:12.5px;line-height:1.85;color:var(--ink);overflow-x:auto}
+.elev pre .cm{color:var(--faint)}.elev pre .aw{color:var(--amber);font-weight:700}
+.elev pre .t2{color:var(--teal)}.elev pre .k{color:#c792ea}
+.chain{margin-top:18px;border:1px solid var(--line);background:var(--panel-2);padding:28px 26px;display:flex;flex-direction:column;align-items:center}
+.frame{width:min(580px,100%);border:1px solid var(--line);background:var(--panel);padding:13px 18px;display:flex;align-items:center;gap:14px;font-size:13px;transition:all .3s}
+.frame .fn{color:var(--ink);font-weight:500}
+.frame .tagx{margin-left:auto;font-size:10.5px;letter-spacing:.06em;color:var(--dim);text-align:right;line-height:1.4}
+.frame.elv{border-color:var(--amber-dim);background:linear-gradient(180deg,rgba(255,180,84,.06),var(--panel) 72%)}
+.frame.elv .fn{color:var(--amber)}
+.frame.elv .tagx{color:var(--amber-dim)}
+.frame.leaf{border-color:var(--teal)}
+.frame.leaf .fn{color:var(--teal)}
+.frame.boundary{border-style:dashed}
+.chain .dn{color:var(--faint);font-size:11px;letter-spacing:.1em;padding:8px 0}
+
+/* elevation — lazy tier-flip machine */
+.elevm{margin-top:18px}
+.elevm .describe::before{content:"tier ▸ ";color:var(--faint);font-style:normal}
+.elevbody{display:grid;grid-template-columns:1.45fr .9fr;min-height:430px}
+.chain2{border-right:1px solid var(--line);padding:24px 22px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.frame2{width:min(440px,100%);border:1px solid var(--line);background:var(--panel);padding:12px 16px;display:flex;align-items:center;gap:12px;font-size:13px;transition:border-color .45s,background .45s,color .45s,opacity .45s}
+.frame2 .fn{color:var(--ink);font-weight:500;white-space:nowrap}
+.frame2 .badge{margin-left:auto;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;padding:3px 9px;border:1px solid var(--faint);color:var(--dim);transition:all .45s;white-space:nowrap}
+.frame2.blk{opacity:.6}
+.frame2.hot{border-color:var(--red);background:linear-gradient(180deg,rgba(255,93,93,.09),var(--panel) 70%)}
+.frame2.hot .fn{color:var(--red)}.frame2.hot .badge{border-color:var(--red);color:var(--red)}
+.frame2.wit{border-color:var(--teal)}
+.frame2.wit .fn{color:var(--teal)}.frame2.wit .badge{border-color:var(--teal);color:var(--teal)}
+.frame2.elv{border-color:var(--amber-dim);background:linear-gradient(180deg,rgba(255,180,84,.07),var(--panel) 72%)}
+.frame2.elv .fn{color:var(--amber)}.frame2.elv .badge{border-color:var(--amber);color:var(--amber)}
+.frame2.flip{animation:eflip .55s}
+@keyframes eflip{0%{transform:translateX(0)}28%{transform:translateX(7px);opacity:.45}100%{transform:translateX(0);opacity:1}}
+.arr2{color:var(--faint);font-size:10px;letter-spacing:.14em;padding:6px 0;text-transform:uppercase}
+.elevrail{padding:18px 18px;display:flex;flex-direction:column;gap:13px;font-size:12.5px}
+.tierline{display:flex;align-items:center;gap:14px}
+#etier{font-size:26px;font-weight:700;color:var(--teal);line-height:1;transition:color .4s;white-space:nowrap}
+#etier.amber{color:var(--amber)}
+.tierline small{color:var(--dim);font-size:10.5px;line-height:1.5}
+.pcount{display:flex;align-items:baseline;gap:10px}
+#ecount{font-size:26px;color:var(--amber);font-weight:700;line-height:1}
+.pcount small{color:var(--dim);font-size:10.5px}
+.pbar{height:7px;border:1px solid var(--line);background:var(--panel-2);margin-top:9px;overflow:hidden}
+.pbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--amber-dim),var(--amber));transition:width .55s}
+.pbar.phot i{background:linear-gradient(90deg,var(--red),#ff8a8a)}
+.wlist{font-size:11.5px;line-height:1.85}
+.wlist div{color:var(--faint);transition:color .45s}
+.wlist div.seen{color:var(--teal)}
+.thread.blocked .tdot{background:var(--red);box-shadow:0 0 12px var(--red);animation:pulse 1.1s infinite}
+.thread.blocked .tlabel,.thread.blocked .tstate{color:var(--red)}
+.thread.released .tdot{background:var(--green)}
+.thread.released .tlabel,.thread.released .tstate{color:var(--green)}
+
 /* ---- footer ---- */
 footer{
   margin-top:130px;border-top:1px solid var(--line);padding:54px 28px 70px;
@@ -303,7 +361,8 @@ footer .links a{margin:0 14px}
 @media (max-width:1020px){
   .cols{grid-template-columns:1fr}
   .col{border-right:0;border-bottom:1px solid var(--line)}
-  .cards,.vs,.tiers{grid-template-columns:1fr}
+  .cards,.vs,.tiers,.elev,.elevbody{grid-template-columns:1fr}
+  .chain2{border-right:0;border-bottom:1px solid var(--line)}
   .stepname{display:none}
 }
 </style>
@@ -316,6 +375,7 @@ footer .links a{margin:0 14px}
     <a href="#machine">demo</a>
     <a href="#trick">how</a>
     <a href="#compare">vs</a>
+    <a href="#elevate">elevate</a>
     <a href="https://github.com/retronym/async3">github</a>
   </span>
 </nav>
@@ -485,9 +545,100 @@ CompletableFuture&lt;Integer&gt; s = Async.<span style="color:var(--amber)">asyn
   </div>
 </section>
 
+<section id="elevate">
+  <div class="sec-label">05 · elevation</div>
+  <h2>When the blocking is one call away.</h2>
+  <p class="lede">The agent finds <code>await</code> markers. But a method can block <b>without one</b> — by
+  <i>calling</i> a method that awaits. <code>indirect</code> below has no <code>await</code> of its own, yet it
+  blocks on <code>leaf</code>. <b>Elevating the blocking tier</b> gives it a suspending sibling too: every call
+  to a suspendable method is rewritten <code>g(…)</code> → <code>await(g$async(…))</code>, and the
+  suspension propagates up the call chain to the async boundary.</p>
+
+  <div class="elev">
+    <div class="panel">
+      <div class="lbl2">source — not an await in sight</div>
+      <pre><span class="k">static int</span> <span class="t2">indirect</span>(CompletableFuture&lt;Integer&gt; f) {
+    <span class="cm">// blocks only because leaf() does</span>
+    <span class="k">return</span> leaf(f) * 10;
+}</pre>
+    </div>
+    <div class="panel after">
+      <div class="lbl2">derived indirect$asyncBody — the call <i>is</i> the suspension</div>
+      <pre>invokestatic <span class="aw">leaf$async</span>   <span class="cm">// → CompletableFuture</span>
+<span class="aw">getCompleted·onComplete·tryGet</span>  <span class="cm">// park &amp; resume</span>
+checkcast Integer; intValue  <span class="cm">// Object back to int</span>
+bipush 10; imul              <span class="cm">// …the original * 10</span></pre>
+    </div>
+  </div>
+
+  <p class="lede" style="margin-top:36px">But <i>when</i> does a method get elevated? It runs blocking first, and a
+  hot, repeatedly-blocking call witnesses its own stack — then the chain flips, bottom-up, to the async
+  boundary. Step through the lazy tier flip:</p>
+
+  <div class="machine elevm">
+    <div class="machine-head">
+      <span class="dots"><i></i><i></i><i></i></span>
+      <span class="title">lazy tier flip — <b>twoLevel → indirect → leaf → await(f)</b>, elevated on a hot blocking witness</span>
+    </div>
+    <div class="elevbody">
+      <div class="chain2" id="chain2">
+        <div class="frame2" id="ef_b"><span class="fn">Async.async { … }</span><span class="badge">tier 0</span></div>
+        <div class="arr2">↓ calls</div>
+        <div class="frame2" id="ef_t"><span class="fn">twoLevel(f)</span><span class="badge">tier 0</span></div>
+        <div class="arr2">↓ calls</div>
+        <div class="frame2" id="ef_i"><span class="fn">indirect(f)</span><span class="badge">tier 0</span></div>
+        <div class="arr2">↓ calls</div>
+        <div class="frame2" id="ef_l"><span class="fn">leaf(f) → await(f)</span><span class="badge">tier 0</span></div>
+      </div>
+      <div class="elevrail">
+        <div class="rt-box">
+          <div class="bh">tier register</div>
+          <div class="tierline"><div id="etier">0</div><small id="etierNote">blocking — runs as-is</small></div>
+        </div>
+        <div class="rt-box">
+          <div class="bh">profiler — leaf:await blocking-count</div>
+          <div class="pcount"><span id="ecount">0</span><small id="ecountNote">slow-path increments</small></div>
+          <div class="pbar" id="epbar"><i></i></div>
+        </div>
+        <div class="rt-box">
+          <div class="bh">carrier thread</div>
+          <div class="thread" id="ethread"><span class="tdot"></span><span class="tlabel">worker-1</span><span class="tstate" id="ethreadState">idle</span></div>
+        </div>
+        <div class="rt-box">
+          <div class="bh">StackWalker witness</div>
+          <div class="wlist" id="ewlist">
+            <div id="ew_l">› leaf — await(f)</div>
+            <div id="ew_i">› indirect</div>
+            <div id="ew_t">› twoLevel</div>
+            <div id="ew_b">› Async.async (boundary)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="machine-foot">
+      <div class="describe" id="edesc">—</div>
+      <div class="elog" id="elog2"></div>
+      <div class="ctrlbar">
+        <button class="btn primary" id="eplay">▶ play</button>
+        <button class="btn" id="estep">⏭ step</button>
+        <button class="btn" id="ereset">↺ reset</button>
+        <span class="stepname" id="estepName"></span>
+        <span class="steps" id="estepDots"></span>
+      </div>
+    </div>
+  </div>
+
+  <p class="lede" style="margin-top:24px">A monotone fixpoint over the call graph finds every suspendable method
+  (cycles and recursion converge); the blocking original is left <b>byte-identical</b>, and the elevated result
+  matches it exactly — <b>verified blocking ≡ elevated</b>, fast path and real suspension. The within-a-class
+  rewrite above is <b>implemented</b>; the witness-driven flip shown here — <code>StackWalker</code> sampling,
+  on-demand hidden siblings, the <code>MutableCallSite</code> edge — is the runtime tier in the
+  <a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">design doc §7.7</a>.</p>
+</section>
+
 <footer>
   <div class="big">Suspension with a non-empty operand stack: <em>1 + (2 * await(f)) + mul(await(g), 3)</em> — the case ANF exists to forbid. <em>It just works here.</em></div>
-  <pre>git clone … && mvn test   <span style="color:var(--faint)"># 52 green</span></pre>
+  <pre>git clone … && mvn test   <span style="color:var(--faint)"># 60 green</span></pre>
   <div class="links">
     <a href="https://github.com/retronym/async3">repository</a> ·
     <a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">design doc</a> ·
@@ -512,7 +663,7 @@ CompletableFuture&lt;Integer&gt; s = Async.<span style="color:var(--amber)">asyn
     col.innerHTML=html;host.appendChild(col);
   }
   const m=document.getElementById("marq");
-  const items=["<b>tableswitch</b> on state","spill → <b>prims[2]</b>","fast path: <b>getCompleted</b>","liveness → <b>aconst_null · aastore</b>","park → <b>onComplete</b>","resume in <b>apply()</b>","LVT carried over — <b>x = 5</b> by name","<b>NEW-sinking</b> for new Foo(await(f))","52 tests · blocking ≡ transformed"];
+  const items=["<b>tableswitch</b> on state","spill → <b>prims[2]</b>","fast path: <b>getCompleted</b>","liveness → <b>aconst_null · aastore</b>","park → <b>onComplete</b>","resume in <b>apply()</b>","LVT carried over — <b>x = 5</b> by name","<b>NEW-sinking</b> for new Foo(await(f))","<b>elevation</b>: invoke g → await(g$async)","60 tests · blocking ≡ transformed"];
   m.innerHTML=(items.map(i=>`<span>${i}</span>`).join("")).repeat(2);
 })();
 
@@ -657,6 +808,132 @@ let played=false;
 new IntersectionObserver(es=>{
   if(!played&&es[0].isIntersecting){played=true;setTimeout(play,500);}
 },{threshold:.45}).observe(document.querySelector(".machine"));
+</script>
+
+<script>
+/* ---------- the elevation (lazy tier-flip) machine ---------- */
+(function(){
+  const $=id=>document.getElementById(id);
+  const KEYS=["b","t","i","l"];
+  const ELV_BADGE={b:"indy → $async",t:"twoLevel$async",i:"indirect$async",l:"leaf$async ✓"};
+  function badge(key,cls){
+    if(cls==="hot")return "hot · blocking";
+    if(cls==="wit")return "witnessed";
+    if(cls==="elv")return ELV_BADGE[key];
+    return "tier 0";
+  }
+  // each step is a full snapshot of the chain + rail
+  const S=[
+   {name:"idle — press play",cls:{b:"",t:"",i:"",l:""},flip:[],
+    tier:"0",amber:false,tnote:"blocking — runs as-is",count:0,pct:0,phot:false,cnote:"slow-path increments",
+    thr:"idle",thrText:"idle",wseen:[],desc:"—",log:null},
+
+   {name:"first call — everything blocks (tier 0)",cls:{b:"blk",t:"blk",i:"blk",l:"blk"},flip:[],
+    tier:"0",amber:false,tnote:"blocking — runs as-is",count:1,pct:10,phot:false,cnote:"first blocking await",
+    thr:"blocked",thrText:"BLOCKED on f.join()",wseen:[],
+    desc:"tier 0: await(f) parks a real carrier thread — nothing suspends",
+    log:"<b>main</b> ▸ twoLevel(f) → indirect(f) → leaf(f) → await(f).join() — carrier thread held the whole way down"},
+
+   {name:"the blocking await counts itself",cls:{b:"blk",t:"blk",i:"blk",l:"blk"},flip:[],
+    tier:"0",amber:false,tnote:"blocking — runs as-is",count:9,pct:60,phot:false,cnote:"per-site counter rising",
+    thr:"blocked",thrText:"BLOCKED on f.join()",wseen:[],
+    desc:"every trip through the blocking await bumps a per-site counter",
+    log:"<b>AsyncRT.await</b> slow path ▸ leaf:await blocking-count climbing… 9"},
+
+   {name:"hot & blocking → trigger a witness",cls:{b:"blk",t:"blk",i:"blk",l:"hot"},flip:[],
+    tier:"0",amber:false,tnote:"blocking — runs as-is",count:12,pct:100,phot:true,cnote:"threshold crossed",
+    thr:"blocked",thrText:"BLOCKED on f.join()",wseen:[],
+    desc:"leaf:await crosses the hot-and-blocking threshold — worth elevating",
+    log:"<b>profiler</b> ▸ leaf:await is <span class='ok'>HOT</span> and blocking — sample the stack"},
+
+   {name:"StackWalker witnesses the parked stack",cls:{b:"wit",t:"wit",i:"wit",l:"wit"},flip:[],
+    tier:"0",amber:false,tnote:"witnessed chain",count:12,pct:100,phot:true,cnote:"threshold crossed",
+    thr:"blocked",thrText:"BLOCKED on f.join()",wseen:["l","i","t","b"],
+    desc:"a real suspension path — actual dispatched callees, up to the async boundary",
+    log:"<b>StackWalker</b> ▸ [leaf, indirect, twoLevel, Async.async] — the chain to elevate, bottom-up to the boundary"},
+
+   {name:"elevate leaf — its pair already exists",cls:{b:"wit",t:"wit",i:"wit",l:"elv"},flip:["l"],
+    tier:"…",amber:true,tnote:"elevating — bottom-up",count:0,pct:0,phot:false,cnote:"reset",
+    thr:"blocked",thrText:"old call still parked",wseen:["l","i","t","b"],
+    desc:"leaf awaits directly: its leaf$async sibling was prepared at load time, in-host",
+    log:"<b>elevate leaf</b> ▸ leaf$async already present — direct awaiter, no work"},
+
+   {name:"elevate indirect — the call becomes the suspension",cls:{b:"wit",t:"wit",i:"elv",l:"elv"},flip:["i"],
+    tier:"…",amber:true,tnote:"elevating — bottom-up",count:0,pct:0,phot:false,cnote:"reset",
+    thr:"blocked",thrText:"old call still parked",wseen:["l","i","t","b"],
+    desc:"indirect has no await of its own — its call to leaf becomes the suspension point",
+    log:"<b>elevate indirect</b> ▸ defineHiddenClass(indirect$asyncBody) · invoke leaf → await(leaf$async)"},
+
+   {name:"elevate twoLevel",cls:{b:"wit",t:"elv",i:"elv",l:"elv"},flip:["t"],
+    tier:"…",amber:true,tnote:"elevating — bottom-up",count:0,pct:0,phot:false,cnote:"reset",
+    thr:"blocked",thrText:"old call still parked",wseen:["l","i","t","b"],
+    desc:"and up another frame — twoLevel suspends through indirect$async",
+    log:"<b>elevate twoLevel</b> ▸ defineHiddenClass(twoLevel$asyncBody) · invoke indirect → await(indirect$async)"},
+
+   {name:"flip the boundary edge (MutableCallSite)",cls:{b:"elv",t:"elv",i:"elv",l:"elv"},flip:["b"],
+    tier:"★",amber:true,tnote:"elevated — chain suspends",count:0,pct:0,phot:false,cnote:"idle",
+    thr:"idle",thrText:"idle",wseen:["l","i","t","b"],
+    desc:"the async boundary's call site flips from blocking to the $async chain — via invokedynamic",
+    log:"<b>Async.async</b> edge ▸ MutableCallSite → suspending entry; the chain is elevated end-to-end"},
+
+   {name:"next call suspends — no carrier held",cls:{b:"elv",t:"elv",i:"elv",l:"elv"},flip:[],
+    tier:"★",amber:true,tnote:"elevated — chain suspends",count:0,pct:0,phot:false,cnote:"idle",
+    thr:"released",thrText:"RELEASED — free for other work",wseen:["l","i","t","b"],
+    desc:"twoLevel$async(f): at await(f) the frame spills to refs/prims — the thread is handed back",
+    log:"<b>main</b> ▸ twoLevel$async(f) … await(f) ▸ frame spilled, <span class='ok'>thread released</span> — same answer the blocking tier gave"},
+
+   {name:"goes cold? flip back (de-elevation)",cls:{b:"blk",t:"blk",i:"blk",l:"blk"},flip:[],
+    tier:"0",amber:false,tnote:"blocking — reversible",count:0,pct:0,phot:false,cnote:"cold",
+    thr:"idle",thrText:"idle",wseen:[],
+    desc:"the MutableCallSite flips back when the path cools — elevation is reversible, so cold code pays nothing",
+    log:"<b>cold</b> ▸ edges flip back to blocking — elevate only what stays hot"}
+  ];
+
+  KEYS.forEach(k=>{ /* nothing — frames are static in the DOM */ });
+  $("estepDots").innerHTML=S.map((s,i)=>`<i data-i="${i}" title="${s.name}"></i>`).join("");
+
+  let cur=0,timer=null;
+  function render(i,animate){
+    const s=S[i];
+    KEYS.forEach(k=>{
+      const el=$("ef_"+k);
+      el.classList.remove("blk","hot","wit","elv","flip");
+      if(s.cls[k])el.classList.add(s.cls[k]);
+      el.querySelector(".badge").textContent=badge(k,s.cls[k]);
+      if(animate&&s.flip.includes(k)){void el.offsetWidth;el.classList.add("flip");}
+    });
+    const tier=$("etier");tier.textContent=s.tier;tier.classList.toggle("amber",s.amber);
+    $("etierNote").textContent=s.tnote;
+    $("ecount").textContent=s.count;$("ecountNote").textContent=s.cnote;
+    const bar=$("epbar");bar.classList.toggle("phot",s.phot);bar.querySelector("i").style.width=s.pct+"%";
+    const th=$("ethread");th.classList.remove("running","blocked","released");
+    if(s.thr!=="idle")th.classList.add(s.thr);
+    $("ethreadState").textContent=s.thrText;
+    KEYS.forEach(k=>$("ew_"+k).classList.toggle("seen",s.wseen.includes(k)));
+    $("edesc").textContent=s.desc;
+    $("estepName").innerHTML=`step ${i}/${S.length-1} — <b>${s.name}</b>`;
+    document.querySelectorAll("#estepDots i").forEach((d,k)=>d.className=k<i?"done":k===i?"cur":"");
+    if(animate&&s.log){const e=$("elog2"),div=document.createElement("div");div.innerHTML=s.log;e.appendChild(div);e.scrollTop=e.scrollHeight;}
+  }
+  function go(i,animate){cur=i;render(i,animate);}
+  function stop(){if(timer){clearInterval(timer);timer=null;$("eplay").textContent="▶ play";}}
+  function step(){if(cur<S.length-1)go(cur+1,true);else stop();}
+  function play(){
+    if(timer){stop();return;}
+    if(cur>=S.length-1)reset();
+    $("eplay").textContent="⏸ pause";step();
+    timer=setInterval(()=>{if(cur>=S.length-1)stop();else step();},2100);
+  }
+  function reset(){stop();$("elog2").innerHTML="";go(0,false);}
+  $("eplay").onclick=play;$("estep").onclick=()=>{stop();step();};$("ereset").onclick=reset;
+  document.querySelectorAll("#estepDots i").forEach(d=>d.onclick=()=>{stop();$("elog2").innerHTML="";go(+d.dataset.i,false);});
+  render(0,false);
+
+  let played=false;
+  new IntersectionObserver(es=>{
+    if(!played&&es[0].isIntersecting){played=true;setTimeout(play,400);}
+  },{threshold:.4}).observe(document.querySelector(".elevm"));
+})();
 </script>
 </body>
 </html>

@@ -238,8 +238,12 @@ local 0; the state machine joins the host's nest for private access); liveness-d
 of dead ref slots (a suspended frame pins only what the resumed code can still read — the
 analogue of scala-async's `fieldsToNullOut`); per-state `$asyncDebug`
 frame metadata; `AsyncDebug.describe`; LVT/line-number carry-over; the agent, the
-`async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging.
-52 tests, including a semantic matrix running every sample blocking vs. transformed, fast
+`async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging;
+**transitive elevation** — a method that blocks only because it calls a suspendable sibling
+(no `await` of its own) gets a suspending `$async` variant too, the agent rewriting
+`invoke g` to `await(g$async(...))` for every suspendable same-class callee (the static
+in-class slice of the "elevate the blocking tier" design, docs/DESIGN.md §7.7).
+60 tests, including a semantic matrix running every sample blocking vs. transformed, fast
 path vs. real suspension.
 
 **Rejected with diagnostics** (rather than miscompiled): await under a monitor, await in

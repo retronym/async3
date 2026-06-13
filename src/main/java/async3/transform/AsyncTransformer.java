@@ -151,14 +151,21 @@ public final class AsyncTransformer {
     public static byte[] transformInPlace(byte[] classBytes) {
         ClassNode cn = new ClassNode();
         new ClassReader(classBytes).accept(cn, ClassReader.SKIP_FRAMES);
+        // Suspendable = directly awaits, or (transitively) calls a suspendable sibling. Computed
+        // once over the original methods, before any generated members exist — so re-entry is
+        // idempotent (the transformed bodies no longer carry award markers nor call originals).
+        Set<String> suspendable = suspendableMethods(cn);
         List<MethodNode> added = new ArrayList<>();
         for (MethodNode mn : new ArrayList<>(cn.methods)) {
-            if (!hasAwait(mn)) continue;
+            if (!suspendable.contains(methodKey(mn))) continue;
             String entryDesc = Type.getMethodDescriptor(Type.getObjectType(CF), Type.getArgumentTypes(mn.desc));
             if (hasMethod(cn, mn.name + "$async", entryDesc)) continue;
             checkSupported(cn, mn);
             // Work on a copy: the original method body stays byte-identical as the blocking tier.
             MethodNode work = copyOf(mn);
+            // Elevate calls to suspendable siblings (invoke g -> await(g$async)) before any other
+            // rewrite, so the injected suspension points flow through new-sinking and analysis.
+            elevate(cn, work, suspendable);
             sinkUninitializedNews(cn, work);
             Type[] entry = entryTypes(cn, mn);
             Frame<BasicValue>[] frames = analyze(cn.name, work);
@@ -351,6 +358,115 @@ public final class AsyncTransformer {
         return false;
     }
 
+    // ------------------------------------------------------------------ transitive suspension
+
+    /** Identifies a method within a class by name+descriptor (descriptor disambiguates overloads). */
+    private static String methodKey(MethodNode mn) { return mn.name + mn.desc; }
+
+    private static String methodKey(MethodInsnNode mi) { return mi.name + mi.desc; }
+
+    /**
+     * The set of methods in {@code cn} that are <em>suspendable</em>: they either call the
+     * {@code await} marker directly, or (transitively) call another suspendable method of the
+     * same class. This is the in-class slice of §7.7's call-graph closure — the static analogue
+     * of the runtime stack witness. A suspendable method that this transform cannot rewrite
+     * (constructor, {@code synchronized}, monitor) is left out, so suspension simply stops at
+     * that boundary rather than aborting the class; a method that <em>directly</em> awaits but is
+     * unsupported is still seeded here and rejected loudly by {@link #checkSupported} downstream,
+     * preserving the existing diagnostics.
+     *
+     * <p>Computed as a monotone fixpoint over the same-class call graph, so cycles (recursion,
+     * mutual recursion) converge correctly. Only same-class edges are followed: elevating a call
+     * to {@code g} requires {@code g$async} to exist, and within one {@code transformInPlace}
+     * pass that is guaranteed only for {@code cn}'s own methods. Cross-class elevation needs every
+     * class on the path to carry the pair (the agent's per-class processing) and a wider closure;
+     * deferred (see docs/DESIGN.md §7.7).
+     */
+    private static Set<String> suspendableMethods(ClassNode cn) {
+        Set<String> suspendable = new LinkedHashSet<>();
+        for (MethodNode mn : cn.methods)
+            if (hasAwait(mn)) suspendable.add(methodKey(mn));
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            for (MethodNode mn : cn.methods) {
+                if (suspendable.contains(methodKey(mn))) continue;
+                if (unsupportedReason(mn) != null) continue; // cannot be elevated: stop suspension here
+                for (AbstractInsnNode insn : mn.instructions)
+                    if (insn instanceof MethodInsnNode mi
+                            && mi.owner.equals(cn.name) && suspendable.contains(methodKey(mi))) {
+                        suspendable.add(methodKey(mn));
+                        grew = true;
+                        break;
+                    }
+            }
+        }
+        return suspendable;
+    }
+
+    /**
+     * Retargets each call to a suspendable sibling so that {@code mn} suspends through it instead
+     * of blocking on it: {@code invoke g(args)R} becomes {@code await(g$async(args))}, coerced
+     * back to {@code R}. The injected {@code await} marker is an ordinary suspension point that
+     * the downstream state-machine transform turns into a park/resume site like any author-written
+     * one — so {@code mn} need not contain a single source-level {@code await} to become a state
+     * machine. The {@code $async} entry shares {@code g}'s parameter descriptor (only the return
+     * type changes to {@code CompletableFuture}) and is invoked with the same opcode and receiver,
+     * so the operand stack at the call is unchanged.
+     */
+    private static void elevate(ClassNode cn, MethodNode mn, Set<String> suspendable) {
+        List<MethodInsnNode> calls = new ArrayList<>();
+        for (AbstractInsnNode insn : mn.instructions)
+            if (insn instanceof MethodInsnNode mi
+                    && mi.owner.equals(cn.name) && suspendable.contains(methodKey(mi)))
+                calls.add(mi);
+        for (MethodInsnNode mi : calls) {
+            Type ret = Type.getReturnType(mi.desc);
+            String asyncDesc = Type.getMethodDescriptor(Type.getObjectType(CF), Type.getArgumentTypes(mi.desc));
+            InsnList repl = new InsnList();
+            repl.add(new MethodInsnNode(mi.getOpcode(), mi.owner, mi.name + "$async", asyncDesc, mi.itf));
+            repl.add(new MethodInsnNode(INVOKESTATIC, AWAIT_OWNER, AWAIT_NAME, AWAIT_DESC, false));
+            repl.add(coerceFromObject(ret));
+            mn.instructions.insertBefore(mi, repl);
+            mn.instructions.remove(mi);
+        }
+    }
+
+    /**
+     * Coerces the {@code Object} left by the {@code await} marker back to {@code ret}, mirroring
+     * the checkcast/unbox javac emits after an author-written {@code await} — the same instructions
+     * the state-machine transform relies on following a suspension point.
+     */
+    private static InsnList coerceFromObject(Type ret) {
+        InsnList il = new InsnList();
+        switch (ret.getSort()) {
+            case Type.VOID -> il.add(new InsnNode(POP));
+            case Type.OBJECT, Type.ARRAY -> il.add(new TypeInsnNode(CHECKCAST,
+                    ret.getSort() == Type.ARRAY ? ret.getDescriptor() : ret.getInternalName()));
+            default -> { // primitive: checkcast to the wrapper, then unbox
+                String boxed = boxedName(ret);
+                il.add(new TypeInsnNode(CHECKCAST, boxed));
+                il.add(new MethodInsnNode(INVOKEVIRTUAL, boxed,
+                        ret.getClassName() + "Value", "()" + ret.getDescriptor(), false));
+            }
+        }
+        return il;
+    }
+
+    private static String boxedName(Type prim) {
+        return switch (prim.getSort()) {
+            case Type.BOOLEAN -> "java/lang/Boolean";
+            case Type.BYTE -> "java/lang/Byte";
+            case Type.CHAR -> "java/lang/Character";
+            case Type.SHORT -> "java/lang/Short";
+            case Type.INT -> "java/lang/Integer";
+            case Type.LONG -> "java/lang/Long";
+            case Type.FLOAT -> "java/lang/Float";
+            case Type.DOUBLE -> "java/lang/Double";
+            default -> throw new IllegalArgumentException("not a primitive: " + prim);
+        };
+    }
+
     /**
      * The entry locals of the original method: {@code [this,] param...}, with slot numbering
      * matching the original frame. `this` needs no special treatment anywhere: it is just the
@@ -366,21 +482,33 @@ public final class AsyncTransformer {
     }
 
     private static void checkSupported(ClassNode cn, MethodNode mn) {
-        String where = cn.name + "." + mn.name + mn.desc;
+        String reason = unsupportedReason(mn);
+        if (reason != null)
+            throw new UnsupportedOperationException(reason + ": " + cn.name + "." + mn.name + mn.desc);
+    }
+
+    /**
+     * The reason {@code mn} cannot host a suspension point, or null if it can. Shared by the loud
+     * {@link #checkSupported} (the direct-await path, where rejection aborts the whole class) and
+     * the quiet {@link #suspendableMethods} closure (which simply declines to elevate a method it
+     * cannot transform, leaving it on the blocking tier).
+     */
+    private static String unsupportedReason(MethodNode mn) {
         if (mn.name.equals("<init>") || mn.name.equals("<clinit>"))
-            throw new UnsupportedOperationException("await is not supported in constructors/initializers: " + where);
+            return "await is not supported in constructors/initializers";
         if ((mn.access & ACC_SYNCHRONIZED) != 0)
-            throw new UnsupportedOperationException("await is illegal in a synchronized method: " + where);
+            return "await is illegal in a synchronized method";
         for (AbstractInsnNode insn : mn.instructions) {
             int op = insn.getOpcode();
             // Coarse: rejects any monitor usage in an awaiting method. Precise monitor-depth
             // dataflow ("is a monitor held *at* the suspension point") is a straightforward
             // refinement.
             if (op == MONITORENTER || op == MONITOREXIT)
-                throw new UnsupportedOperationException("await may not be used while a monitor is held: " + where);
+                return "await may not be used while a monitor is held";
             if (op == JSR || op == RET)
-                throw new UnsupportedOperationException("JSR/RET not supported: " + where);
+                return "JSR/RET not supported";
         }
+        return null;
     }
 
     // ------------------------------------------------------------------ entry point on host class

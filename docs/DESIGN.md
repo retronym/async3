@@ -354,6 +354,154 @@ Not covered by the agent: stepping over a real suspension still steps out
 `ClassFileTransformer` never sees hidden classes (irrelevant here — lambda
 bodies live in ordinary capturing classes).
 
+## 7.7 Elevating the blocking tier (transitive suspension)
+
+§7.6 transforms a method iff its *own* bytecode contains an `await` marker
+(`hasAwait`). That is purely local: the agent walks one class at a time, at
+load, and never consults a call graph. It catches **direct** blocking. It
+cannot catch **indirect** blocking — a method `f` that blocks only because
+`f → g → await`. Making `f` *suspend* rather than block is "elevating the
+blocking tier", and it is the missing half of the tiering story.
+
+Elevation needs two separable things; keep them apart:
+
+1. **A suspending entry on the callee** (`g$async`) reachable from `f`.
+2. **A rewrite of `f`**: the `invoke g` becomes `await(g$async(...))`, then `f`
+   runs through the ordinary state-machine transform. At bytecode level this is
+   mechanical marker injection around a retargeted invoke — the easy half.
+
+The hard half is **discovery**: *which* methods need elevating? That is the
+transitive closure "suspendable if it directly awaits, or calls a suspendable
+method," over the override graph — function *coloring*. Every production system
+(Kotlin `suspend`, scala-async, Optimus `@async`, Quasar `@Suspendable`) makes
+the author or compiler supply this closure rather than infer it, for two
+reasons that bite the agent directly:
+
+- **The load-time agent cannot see the call graph.** It transforms `C` before
+  `C`'s callees load — they may never load, may come from code you didn't
+  build, or be chosen by virtual dispatch. A sound *static* closure needs a
+  closed world the agent lacks.
+- **`retransformClasses` cannot add members.** So you cannot learn `f` is
+  suspendable and *then* graft `f$async`/`f$asyncBody` onto the loaded class.
+  Adding members is legal only at first load — before you know you need them.
+
+### Design: discover by runtime witness, materialize on demand
+
+The chosen resolution sidesteps the static closure entirely and leans on the
+fact that **tier 0 already runs correctly**, so the closure can be *observed*
+instead of computed.
+
+**Discovery — the blocking `await` is its own profiler.** The slow path of the
+blocking `AsyncRT.await` (the branch that is about to park a real thread) bumps
+a per-site counter and, when hot, takes one `StackWalker` sample
+(`RETAIN_CLASS_REFERENCE`). That sample **is a concrete witness of one real
+suspension path** — `f → g → await`, with the *actual dispatched* callees, not
+static types. Virtual dispatch thus resolves itself: you elevate against the
+target that really ran, never reasoning about the override graph or the open
+world. The suspendable set `S` grows only by witnessed evidence; nothing in it
+is speculative. Counter and witness come from one site.
+
+**Materialization — on-demand hidden-class siblings.** Indirectly-blocking
+methods get *nothing* at load (no bloat — the cost model stays "pay only where
+profiling says it matters"). At elevation time, per method:
+
+1. Read the method's bytecode back from its defining loader, run the
+   single-method transform, and define the state machine as a **hidden class**
+   (`defineHiddenClass(bytes, NESTMATE)` into the method's own nest for private
+   access) — the §7.5 shape, the same cost model as today's no-agent `lift`
+   fallback, now triggered by the profiler instead of by first use.
+2. Inside that body, each `invoke g` being suspended through is retargeted to
+   `await(g$async(...))` before the transform runs.
+3. Cache a `MethodHandle` to the hidden entry, keyed per method (the
+   constructor-handle cache `Async` already keeps).
+
+**Dispatch — the edge goes through `invokedynamic`.** Hidden classes are not
+nameable in a constant pool, so a caller cannot `invoke f$async` directly. The
+caller→callee *edge* is flipped by **retransforming the caller's body** (legal:
+body replacement only) so the `invoke f` becomes an indy site whose bootstrap
+returns the `MethodHandle` to `f`'s hidden entry, awaited, backed by a
+`MutableCallSite`. The call site can therefore also be flipped **back** to
+blocking when a path goes cold — de-elevation, which a hard-coded retransform
+would forfeit. This is precisely §7's tier-flip mechanism; the two design
+choices converge on it.
+
+Net: the retransform restriction is dodged from both sides — **bodies are
+retransformed (callers + boundary), members are never added to loaded classes
+(callees become hidden classes instead).** (The agent must declare
+`Can-Retransform-Classes` and register with `addTransformer(t, true)`; §7.6's
+agent does not today.)
+
+### The chain has a top and a bottom
+
+```
+Async.async { ... }          ← async boundary: already transformed; has its in-host pair
+        │  calls e()
+        ▼
+        e   ── elevate ──▶ retarget invoke f → await(f$async); regen
+        │  calls f()
+        ▼
+        f   ── elevate ──▶ retarget invoke g → await(g$async); gen hidden sibling
+        │  calls g()
+        ▼
+        g   (direct awaiter: already has g$async in-host from load time)
+        │
+        ▼
+      await(leaf)            ← blocking-await slow path fires; live stack IS the witness
+```
+
+**Elevation is only useful contiguously from the await up to an async
+boundary.** Suspending `f` while `e` still blocks merely moves the park up one
+frame. So the unit of elevation is the *run of frames between a boundary and a
+hot await*, and the boundary (`Async.async`/`lift`, or an actor/workflow
+scheduler entry) is the natural top: it already exists because the user opted
+in there, and already carries its in-host pair. The witnessed stack always
+bottoms at such a boundary, so propagation terminates on its own. **Granularity
+decision: flip the whole witnessed chain on first hot observation** — the
+boundary bounds it, so there is nothing to ratchet toward.
+
+**The entry ABI is a firewall against re-derivation cascades.** Once `f` calls
+`g$async`, later elevation *inside* `g` (because `g`'s own callee goes hot) is
+invisible to `f` — `f` still calls the stable `g$async` entry. Deepening the
+closure never regenerates already-elevated callers. The set `S` grows
+monotonically and each method is derived at most once.
+
+### Costs, stated honestly
+
+- **Debugging regresses for elevated indirect methods.** Direct-await methods
+  keep in-host breakpoint binding (load-time pair). An *elevated* method's live
+  bytecode now lives in a hidden class, so it re-enters the §7.5 problem:
+  IntelliJ's exact-name class-prepare filter will not bind a line breakpoint
+  inside `Owner$async$f$N`. Fix mirrors the lambda path — a
+  `-Dasync3.elevate.debuggable` shadow mode — or accept that hot-elevated
+  frames debug like the no-agent path. (The universal-entry alternative —
+  give *every* method a shim pair at load, elevate by body-retransform only —
+  keeps these in-host and makes elevation unconditionally sound, at the price
+  of pervasive class bloat. Rejected here in favour of "pay only where hot.")
+- **No on-stack replacement** (§7): threads already parked stay parked; only
+  subsequent calls suspend.
+- **Per-elevation work:** one bytecode read-back + parse + `defineHiddenClass`
+  per method, one caller-body retransform per edge; amortized, cached, once per
+  hot path.
+
+**Implemented (the static in-class slice).** `transformInPlace` now computes the
+same-class suspendability closure and performs the elevation rewrite for every
+suspendable method, not just those that await directly: `invoke g` becomes
+`await(g$async(...))`, coerced back to `g`'s return type, and the downstream
+state-machine transform treats the injected marker as an ordinary suspension
+point. So `int indirect(f) { return leaf(f) * 10; }` — no source `await` — gets a
+real `indirect$async` that suspends through `leaf$async`. Closure and rewrite are
+restricted to one class per pass (the only scope where the callee's `$async`
+entry is guaranteed to exist); the blocking original is preserved byte-identical,
+re-entry is idempotent, and callers this transform cannot rewrite are quietly
+left on the blocking tier. What remains is the *runtime* half — discovering
+*which* indirect methods are worth elevating (the `StackWalker` witness), the
+cross-class closure with on-demand hidden siblings, and the indy edge flip.
+
+This is userland Loom's tiering done by observation: tier 0 runs and blocks;
+the blocking await profiles itself; hot blocking stacks are elevated frame by
+frame up to the boundary, with virtual dispatch and the open world handled for
+free because every elevation is backed by a witnessed execution.
+
 ## 8. Prototype plan
 
 Plain Java + upstream ASM (`asm-tree`/`asm-analysis`/`asm-util`); no scalac
@@ -408,6 +556,21 @@ deliberately not used, to keep iteration friction low.
 - **Phase 4 — lazy variant + numbers.** `defineHiddenClass` +
   `MutableCallSite` flip; JMH: blocking vs. AoT-transformed vs. lazily flipped
   vs. the current compiler phase's output; generic frame vs. typed fields.
+- **Phase 4.5 — elevate the blocking tier (§7.7).** ✅ *static in-class slice*:
+  `transformInPlace` computes the same-class suspendability closure (a method is
+  suspendable if it directly awaits or transitively calls one that does, monotone
+  fixpoint, cycle-safe) and elevates each suspendable method — `invoke g`
+  rewritten to `await(g$async(...))` with the result coerced back to `g`'s return
+  type, so a method with no source `await` still becomes a state machine. The
+  blocking original is untouched, re-entry stays idempotent, and unsupported
+  callers (synchronized/monitor/ctor) are quietly left blocking rather than
+  aborting the class. Tested in `ElevateTest` (primitive/object/void coercions,
+  multi-level, mixed direct+indirect, fast path vs. real suspension).
+  *Remaining (runtime-only, not unit-testable):* witness-driven discovery
+  (`StackWalker` sample from the blocking-`await` slow path) to decide *when* to
+  elevate; cross-class closure with on-demand hidden-class siblings; indy/
+  `MutableCallSite` edge flips (de-elevation capable); `Can-Retransform-Classes`
+  on the agent for caller-body rewrites.
 - **Phase 5 — integration sketch only.** Post-`jvm` hook in `GenBCode` (where
   shaded ASM lives) vs. shipping as a build/agent step; shrink
   `markForAsyncTransform` to "keep the await call + annotate".
