@@ -247,7 +247,7 @@ dispatch (sound under overriding, no scaffolding on the callee hierarchy); and a
 tier flip** — the blocking `await` profiles itself with a `StackWalker` sample, and the virtual call
 site starts blocking and flips to a suspending state machine once the awaiting method is hot. The
 "elevate the blocking tier" design: docs/DESIGN.md [§7.7](docs/DESIGN.md#77-elevating-the-blocking-tier-transitive-suspension)/[§7.8](docs/DESIGN.md#78-elevating-through-virtual-dispatch-strategy-b--implemented)/[§7.9](docs/DESIGN.md#79-the-witness-driven-tier-flip-stackwalker--implemented).
-63 tests, including a semantic matrix running every sample blocking vs. transformed, fast
+65 tests, including a semantic matrix running every sample blocking vs. transformed, fast
 path vs. real suspension.
 
 **Rejected with diagnostics** (rather than miscompiled): await under a monitor, await in

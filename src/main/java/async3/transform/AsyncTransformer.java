@@ -289,6 +289,23 @@ public final class AsyncTransformer {
      */
     public static SingleMethod transformMethod(byte[] hostBytes, String methodName, String methodDesc,
                                                boolean shadowHostName) {
+        return transformMethod(hostBytes, methodName, methodDesc, shadowHostName, false);
+    }
+
+    /**
+     * Like {@link #transformMethod(byte[], String, String)}, but first elevates this method's own
+     * virtually dispatched suspendable calls to per-receiver call sites (§7.8/§7.9). A state machine
+     * built this way suspends <em>through</em> its callees instead of blocking on them, so the
+     * runtime path goes deeper than one method: each level's call site resolves and transforms the
+     * next on demand. Used by {@link async3.runtime.Elevation} when it materializes a suspending
+     * entry at runtime.
+     */
+    public static SingleMethod transformMethodElevated(byte[] hostBytes, String methodName, String methodDesc) {
+        return transformMethod(hostBytes, methodName, methodDesc, false, true);
+    }
+
+    private static SingleMethod transformMethod(byte[] hostBytes, String methodName, String methodDesc,
+                                                boolean shadowHostName, boolean elevateVirtualCalls) {
         ClassNode cn = new ClassNode();
         new ClassReader(hostBytes).accept(cn, ClassReader.SKIP_FRAMES);
         MethodNode mn = null;
@@ -296,6 +313,7 @@ public final class AsyncTransformer {
             if (m.name.equals(methodName) && m.desc.equals(methodDesc)) { mn = m; break; }
         if (mn == null)
             throw new IllegalArgumentException("method not found: " + cn.name + "." + methodName + methodDesc);
+        if (elevateVirtualCalls) elevate(cn, mn, suspendableMethods(cn), /*runtimeMode*/ true);
         checkSupported(cn, mn);
         sinkUninitializedNews(cn, mn);
         if (shadowHostName) checkNoHostReferences(cn, mn);
@@ -467,16 +485,29 @@ public final class AsyncTransformer {
      * </ul>
      */
     private static void elevate(ClassNode cn, MethodNode mn, Set<String> suspendable) {
+        elevate(cn, mn, suspendable, false);
+    }
+
+    /**
+     * {@code runtimeMode} is for state machines built lazily at runtime ({@link #transformMethodElevated},
+     * used by {@link async3.runtime.Elevation}): there the loaded class may carry no {@code g$async}
+     * siblings, so only virtually dispatched calls are elevated (through the per-receiver call site,
+     * which resolves and transforms its callee on demand). Statically bound calls are left blocking
+     * — suspension stops at that boundary, the same conservative choice as for unprocessed classes.
+     */
+    private static void elevate(ClassNode cn, MethodNode mn, Set<String> suspendable, boolean runtimeMode) {
         List<MethodInsnNode> calls = new ArrayList<>();
         for (AbstractInsnNode insn : mn.instructions)
             if (insn instanceof MethodInsnNode mi
                     && mi.owner.equals(cn.name) && suspendable.contains(methodKey(mi)))
                 calls.add(mi);
         for (MethodInsnNode mi : calls) {
+            boolean safe = dispatchSafe(cn, mi);
+            if (runtimeMode && safe) continue;   // no g$async to call at runtime — leave blocking
             Type ret = Type.getReturnType(mi.desc);
             Type[] args = Type.getArgumentTypes(mi.desc);
             InsnList repl = new InsnList();
-            if (dispatchSafe(cn, mi)) {
+            if (safe) {
                 String asyncDesc = Type.getMethodDescriptor(Type.getObjectType(CF), args);
                 repl.add(new MethodInsnNode(mi.getOpcode(), mi.owner, mi.name + "$async", asyncDesc, mi.itf));
             } else {

@@ -2,6 +2,7 @@ package async3;
 
 import async3.samples.DispatchSamples;
 import async3.samples.IfaceSamples;
+import async3.samples.ProtectedSamples;
 import async3.transform.AsyncTransformer;
 import async3.transform.InMemoryClassLoader;
 import org.junit.jupiter.api.Test;
@@ -103,5 +104,22 @@ class ElevateDispatchTest {
         Object o = newInstance(ovr);
         assertEquals(9990, blockingVia(ovr, o, "indirect", done(5)));       // 999 * 10 — override ignores f
         assertEquals(9990, asyncVia(ovr, o, "indirect", later(5)));         // Strategy B runs the override, not the default
+    }
+
+    /**
+     * Hardening: the elevated callee may not be public. A {@code protected} overridable target is
+     * dispatched virtually (Strategy B); the call site must resolve it (getMethod misses it →
+     * getDeclaredMethod hierarchy walk + setAccessible), on both the blocking and suspending tiers.
+     */
+    @Test
+    void protectedVirtualTargetResolves() throws Throwable {
+        byte[] out = AsyncTransformer.transformInPlace(classBytes(ProtectedSamples.class));
+        assertNotNull(out);
+        Class<?> c = Class.forName(ProtectedSamples.class.getName(), true,
+                new InMemoryClassLoader(Map.of(ProtectedSamples.class.getName(), out),
+                        ElevateDispatchTest.class.getClassLoader()));
+        Object inst = newInstance(c);
+        assertEquals(18, blockingVia(c, inst, "caller", done(5)));      // (5 + 1) * 3
+        assertEquals(18, asyncVia(c, inst, "caller", later(5)));        // elevated path resolves the protected leaf
     }
 }

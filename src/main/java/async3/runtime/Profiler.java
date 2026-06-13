@@ -1,9 +1,11 @@
 package async3.runtime;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /**
  * The witness behind dynamic ("tier-flip") elevation (docs/DESIGN.md §7.7). The blocking
@@ -33,25 +35,40 @@ public final class Profiler {
     private static final StackWalker WALKER =
             StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
 
-    // Frames to skip while walking down to the awaiting user method.
-    private static final String RT = "async3.runtime.AsyncRT";
-    private static final String ASYNC = "async3.runtime.Async";
-    private static final String SELF = "async3.runtime.Profiler";
-
     /**
      * Record an imminent block. Called from {@link AsyncRT#await} when the future is not done.
-     * The witness is the nearest stack frame outside the marker/runtime classes — the method
-     * that is about to block on this {@code await} — keyed as {@code class.name+descriptor}.
+     * The witness is the <em>contiguous run of blocking user frames</em> above this await, up to
+     * the elevation boundary (the first runtime/reflection/generated frame below them) — the
+     * direct awaiter and every blocking caller it reaches through. Each is counted, so a deeper
+     * caller becomes hot and flips its own call site too (chain elevation), not just the leaf.
+     * Counting only this contiguous run keeps it to the methods actually worth elevating; frames
+     * already on the suspending tier (their bodies use {@code getCompleted}/{@code onComplete},
+     * not {@code await}) never reach here.
      */
     public static void observeBlock() {
         blockingAwaits.incrementAndGet();
-        String key = WALKER.walk(frames -> frames
-                .map(f -> f.getClassName() + "." + f.getMethodName() + f.getDescriptor())
-                .filter(k -> !k.startsWith(RT) && !k.startsWith(ASYNC) && !k.startsWith(SELF))
-                .findFirst().orElse(null));
-        if (key == null) return;
-        if (BLOCKS.computeIfAbsent(key, k -> new AtomicInteger()).incrementAndGet() >= threshold)
-            HOT.add(key);
+        List<String> chain = WALKER.walk(frames -> frames
+                .dropWhile(f -> !isUser(f))   // skip Profiler / AsyncRT.await / Async.await
+                .takeWhile(Profiler::isUser)  // the blocking chain, stopping at the boundary
+                .map(Profiler::keyOf)
+                .collect(Collectors.toList()));
+        for (String key : chain)
+            if (BLOCKS.computeIfAbsent(key, k -> new AtomicInteger()).incrementAndGet() >= threshold)
+                HOT.add(key);
+    }
+
+    private static String keyOf(StackWalker.StackFrame f) {
+        return f.getClassName() + "." + f.getMethodName() + f.getDescriptor();
+    }
+
+    /** A blocking-tier application frame — not runtime/marker/reflection, not a generated entry/body. */
+    private static boolean isUser(StackWalker.StackFrame f) {
+        String cn = f.getClassName();
+        if (cn.startsWith("async3.runtime") || cn.startsWith("async3.transform")
+                || cn.startsWith("java.") || cn.startsWith("jdk.")
+                || cn.startsWith("sun.") || cn.startsWith("com.sun."))
+            return false;
+        return !f.getMethodName().contains("$async");   // $async entry / $asyncBody is already elevated
     }
 
     /** Whether {@code methodKey} ({@code class.name+descriptor}) has crossed the hot threshold. */

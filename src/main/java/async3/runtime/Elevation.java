@@ -109,7 +109,7 @@ public final class Elevation {
             Site(Class<?> rc) {
                 try {
                     MethodType blocking = MethodType.fromMethodDescriptorString(blockingDesc, rc.getClassLoader());
-                    this.target = rc.getMethod(name, blocking.parameterArray());
+                    this.target = resolve(rc, name, blocking.parameterArray());
                     this.decl = target.getDeclaringClass();
                     this.key = decl.getName() + "." + name + blockingDesc;
                 } catch (ReflectiveOperationException e) {
@@ -146,6 +146,27 @@ public final class Elevation {
             }
         }
 
+        /**
+         * Resolve the actual method this receiver runs. {@code getMethod} covers public methods
+         * (including inherited and interface defaults); the fallback walks the superclass chain
+         * with {@code getDeclaredMethod} so a {@code protected}/package-private overridable target
+         * still resolves (and is made accessible for the blocking-tier reflective invoke).
+         */
+        private Method resolve(Class<?> rc, String name, Class<?>[] ptypes) throws NoSuchMethodException {
+            try {
+                return rc.getMethod(name, ptypes);
+            } catch (NoSuchMethodException publicMiss) {
+                for (Class<?> c = rc; c != null; c = c.getSuperclass()) {
+                    try {
+                        Method m = c.getDeclaredMethod(name, ptypes);
+                        m.setAccessible(true);
+                        return m;
+                    } catch (NoSuchMethodException ignore) { /* keep walking up */ }
+                }
+                throw publicMiss;
+            }
+        }
+
         /** Transform {@code decl}'s {@code name+blockingDesc} into a suspending {@code (Object[]) -> CF} invoker. */
         private MethodHandle buildSuspending(Class<?> decl) {
             try {
@@ -155,7 +176,9 @@ public final class Elevation {
                     if (in == null) throw new IllegalStateException("cannot read bytecode of " + decl);
                     declBytes = in.readAllBytes();
                 }
-                AsyncTransformer.SingleMethod sm = AsyncTransformer.transformMethod(declBytes, name, blockingDesc);
+                // Elevated transform: g's own virtually dispatched suspendable calls become
+                // per-receiver call sites too, so suspension goes deeper than this one method.
+                AsyncTransformer.SingleMethod sm = AsyncTransformer.transformMethodElevated(declBytes, name, blockingDesc);
 
                 MethodHandles.Lookup smLookup = MethodHandles.privateLookupIn(decl, caller)
                         .defineHiddenClass(sm.bytes, false, MethodHandles.Lookup.ClassOption.NESTMATE);

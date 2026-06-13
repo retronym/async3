@@ -561,11 +561,14 @@ exists and drives the Strategy-B call site.
 - **The blocking await profiles itself** (`async3.runtime.Profiler`,
   `AsyncRT.await`). When the awaited future is *not* already complete — a real
   carrier block is imminent — `await` calls `Profiler.observeBlock`, which takes
-  a `StackWalker.getInstance(RETAIN_CLASS_REFERENCE)` sample, attributes the
-  block to the nearest user frame (the method that called `await`, keyed as
-  `class.name+descriptor`), and counts it. Crossing a threshold marks that
-  method *hot*. The walk happens only on the slow path, where it is cheap next
-  to the block it precedes.
+  a `StackWalker.getInstance(RETAIN_CLASS_REFERENCE)` sample and counts the
+  **contiguous run of blocking user frames** above the await, up to the
+  elevation boundary (the first runtime/reflection/generated frame below them) —
+  the direct awaiter *and every blocking caller it reaches through*, each keyed
+  `class.name+descriptor`. Counting the whole chain (not just the leaf) is what
+  makes a deeper caller go hot and flip its own call site too — **chain
+  elevation**. Crossing a threshold marks a method *hot*; the walk happens only
+  on the slow path, where it is cheap next to the block it precedes.
 
 - **The call site starts blocking and flips when hot.** Each per-receiver
   `Site` in `Elevation` begins on the **blocking tier**: it simply invokes the
@@ -575,22 +578,31 @@ exists and drives the Strategy-B call site.
   tiers are result-equivalent — flipping only changes whether a not-yet-complete
   await parks the carrier or releases it.
 
-This is the userland-Loom tiering of §7.7, scoped to the call site rather than a
-global `MutableCallSite`. Because the witness keys on the *actual* awaiting
-method and `Elevation` already resolves per actual receiver, the two compose:
-the frame that really blocks is the frame that gets a state machine. No
-on-stack replacement — a call already parked stays parked; only subsequent calls
-suspend (stated, as in JIT tiering). Verified by `DynamicElevationTest`: `N`
-blocking-tier calls on a soon-completing future witness `leaf` hot (no flip yet),
-then the next call — handed a future that never completes on its own — returns a
-*suspended* (incomplete) future instead of parking the caller, and resumes to
-the same answer when the future is fired.
+- **Suspension goes as deep as the chain.** A state machine materialized at
+  runtime is built with `transformMethodElevated`, which elevates the method's
+  *own* virtually dispatched suspendable calls to per-receiver call sites too. So
+  when `mid`'s site flips, the `mid` state machine doesn't block on `leaf` — it
+  suspends through a fresh `leaf` call site, which flips when `leaf` is hot. Each
+  level resolves and transforms the next on demand; the chain comes off the
+  thread one site at a time as the witness marks each level hot.
 
-What remains of §7.7's full vision: elevating the *whole witnessed chain* up to
-the async boundary (today a single frame flips, and suspension propagates up
-through callers that were already elevated); de-elevation when a path cools; and
-applying the same flip to the statically bound (`g$async`) path, which would
-need an indy there too. None of these change the mechanism — only its reach.
+This is the userland-Loom tiering of §7.7, scoped to the call site rather than a
+global `MutableCallSite`. Because the witness counts the actual blocking chain
+and `Elevation` resolves per actual receiver, the two compose: the frames that
+really block are the frames that get state machines. No on-stack replacement — a
+call already parked stays parked; only subsequent calls suspend (stated, as in
+JIT tiering). Verified by `DynamicElevationTest` (one level: `N` blocking calls
+witness `leaf` hot, then the next call suspends instead of parking) and
+`ChainElevationTest` (three levels `top → mid → leaf`: the witness makes both
+`mid` and `leaf` hot, both sites flip on the next call, and it suspends through
+the whole chain to the same answer).
+
+What remains of §7.7's full vision: **de-elevation** when a path cools (the
+`Site` flip is one-way today); applying the same blocking-start flip to the
+**statically bound** (`g$async`) path, which would need an indy there too (it is
+still eager); and, for the agent, `Can-Retransform-Classes` to rewrite
+*already-loaded* caller bodies rather than relying on the caller having been
+elevated at load. None of these change the mechanism — only its reach.
 
 ## 8. Prototype plan
 
@@ -664,11 +676,14 @@ deliberately not used, to keep iteration friction low.
   blocking `AsyncRT.await` profiles itself with a `StackWalker` sample
   (`async3.runtime.Profiler`); the Strategy-B call site starts blocking and flips
   to the suspending transform once the awaiting method is witnessed hot, verified
-  by `DynamicElevationTest`.
-  *Remaining:* elevating the whole witnessed chain up to the async boundary (a
-  single frame flips today, suspension propagating up through already-elevated
-  callers); de-elevation when a path cools; the same flip on the statically bound
-  path (needs an indy there too); cross-class static closure; and on the agent,
+  by `DynamicElevationTest`, and *chain elevation* (§7.9): the witness counts the
+  whole contiguous blocking chain so deeper callers flip too, and runtime state
+  machines are built with `transformMethodElevated` so suspension recurses through
+  per-receiver call sites — `ChainElevationTest` suspends a three-level
+  `top → mid → leaf` chain end to end.
+  *Remaining:* de-elevation when a path cools (the flip is one-way today); the
+  same blocking-start flip on the statically bound `g$async` path (needs an indy
+  there too); cross-class static closure; and on the agent,
   `Can-Retransform-Classes` for caller-body rewrites.
 - **Phase 5 — integration sketch only.** Post-`jvm` hook in `GenBCode` (where
   shaded ASM lives) vs. shipping as a build/agent step; shrink
