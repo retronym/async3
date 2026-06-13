@@ -241,10 +241,10 @@ frame metadata; `AsyncDebug.describe`; LVT/line-number carry-over; the agent, th
 `async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging;
 **transitive elevation** — a method that blocks only because it calls a suspendable sibling
 (no `await` of its own) gets a suspending `$async` variant too, the agent rewriting
-`invoke g` to `await(g$async(...))` for every suspendable same-class callee reached through a
-statically bound call (virtual/interface dispatch is left blocking, since an override may lack a
-matching `$async`) — the static in-class slice of the "elevate the blocking tier" design,
-docs/DESIGN.md §7.7.
+`invoke g` to `await(g$async(...))` for every suspendable same-class callee — directly for
+statically bound calls, and through a per-receiver `invokedynamic` call site for virtual/interface
+dispatch (sound under overriding, with no scaffolding on the callee hierarchy: the
+"elevate the blocking tier" design, docs/DESIGN.md [§7.7](docs/DESIGN.md#77-elevating-the-blocking-tier-transitive-suspension)/[§7.8](docs/DESIGN.md#78-elevating-through-virtual-dispatch-strategy-b--implemented)).
 62 tests, including a semantic matrix running every sample blocking vs. transformed, fast
 path vs. real suspension.
 
@@ -257,6 +257,7 @@ constructors.
 |---|---|
 | [`runtime/AsyncRT`](src/main/java/async3/runtime/AsyncRT.java) | the `await` marker; default implementation blocks (tier 0) |
 | [`runtime/Async`](src/main/java/async3/runtime/Async.java) | lambda front end (cracking + `defineHiddenClass(NESTMATE)`), `lift`, shadow mode |
+| [`runtime/Elevation`](src/main/java/async3/runtime/Elevation.java) | Strategy-B call site: `invokedynamic` bootstrap resolving the suspending entry per actual receiver (virtual/interface elevation) |
 | [`runtime/FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) | state machine base; ABI mirrors `scala.tools.testkit.async.AsyncStateMachine`; the `refs`/`prims` frame |
 | [`transform/AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) | the ASM transform: class-per-method shape and the agent's in-place sibling shape |
 | [`agent/AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) | load-time agent (`Premain-Class` in the jar manifest) |

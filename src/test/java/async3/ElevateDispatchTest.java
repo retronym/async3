@@ -18,10 +18,11 @@ import static async3.TestSupport.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Elevation soundness across dispatch. {@code invoke g} → {@code await(g$async)} is only correct
- * when {@code g} is statically bound; a virtually dispatched callee may be overridden without a
- * matching {@code g$async}, so callers through it are left blocking instead. Guards
- * {@code AsyncTransformer.dispatchSafe} against regression.
+ * Elevation through virtual dispatch via Strategy B ({@link async3.runtime.Elevation}): a virtually
+ * dispatched call to a suspendable sibling is rewritten to an {@code invokedynamic} that resolves
+ * the suspending entry against the actual receiver at runtime. Sound under overriding, with no
+ * {@code $async} scaffolding on the callee hierarchy. Statically bound calls keep the direct
+ * {@code g$async} path.
  */
 class ElevateDispatchTest {
 
@@ -37,50 +38,70 @@ class ElevateDispatchTest {
         return cn.methods.stream().anyMatch(m -> m.name.equals(name));
     }
 
-    @Test
-    void virtualCallIsNotElevatedButFinalCallIs() throws Throwable {
-        ClassNode cn = transformedNode(DispatchSamples.class);
+    static Object asyncVia(Class<?> host, Object target, String name, Object... args) throws Throwable {
+        // getMethod (unlike getDeclaredMethods) resolves inherited default $async siblings
+        Method m = host.getMethod(name + "$async", paramTypes(args));
+        CompletableFuture<?> f = (CompletableFuture<?>) m.invoke(target, args);
+        return f.get(5, TimeUnit.SECONDS);
+    }
 
-        // direct awaiters always get their own pair, regardless of how they are dispatched
+    static Object blockingVia(Class<?> host, Object target, String name, Object... args) throws Throwable {
+        return host.getMethod(name, paramTypes(args)).invoke(target, args);
+    }
+
+    static Class<?>[] paramTypes(Object[] args) {
+        Class<?>[] t = new Class<?>[args.length];
+        for (int i = 0; i < args.length; i++) t[i] = CompletableFuture.class; // all sample params are futures
+        return t;
+    }
+
+    /** Statically bound (final) callee uses the direct path; overridable (virtual) uses Strategy B. */
+    @Test
+    void bothFinalAndVirtualCallsAreElevatedAndSound() throws Throwable {
+        ClassNode cn = transformedNode(DispatchSamples.class);
         assertTrue(hasMethod(cn, "vleaf$async"));
         assertTrue(hasMethod(cn, "fleaf$async"));
+        assertTrue(hasMethod(cn, "callsFinal$async"),   "final-dispatched caller elevates directly");
+        assertTrue(hasMethod(cn, "callsVirtual$async"), "virtual caller elevates via Strategy B");
 
-        // caller through a final (statically bound) callee: elevated
-        assertTrue(hasMethod(cn, "callsFinal$async"), "final-dispatched callee should elevate the caller");
-        // caller through an overridable (virtual) callee: left blocking — no unsound entry
-        assertFalse(hasMethod(cn, "callsVirtual$async"), "virtual dispatch must not be elevated");
-
-        // and the elevated path is semantically faithful to the blocking tier
         byte[] out = AsyncTransformer.transformInPlace(classBytes(DispatchSamples.class));
         Class<?> c = Class.forName(DispatchSamples.class.getName(), true,
                 new InMemoryClassLoader(Map.of(DispatchSamples.class.getName(), out),
                         ElevateDispatchTest.class.getClassLoader()));
-        Object inst = newInstance(c, 100);                       // seed = 100
-        assertEquals(210, invokeOn(c, inst, "callsFinal", done(5)));        // (5 + 100) * 2
-        assertEquals(210, invokeAsyncOn(inst, "callsFinal", later(5)));     // suspends, same answer
+        Object inst = newInstance(c, 100);                                // seed = 100
+        assertEquals(210, blockingVia(c, inst, "callsFinal", done(5)));   // (5 + 100) * 2
+        assertEquals(210, asyncVia(c, inst, "callsFinal", later(5)));
+        assertEquals(210, blockingVia(c, inst, "callsVirtual", done(5)));
+        assertEquals(210, asyncVia(c, inst, "callsVirtual", later(5)));   // suspends through vleaf, same answer
     }
 
+    /**
+     * The headline soundness case. {@code indirect} elevates its {@code INVOKEINTERFACE leaf} via
+     * Strategy B; on a receiver that inherits the awaiting default it suspends, on one that
+     * overrides {@code leaf} it runs the override — each matching its blocking tier (the bug the
+     * static path had to refuse).
+     */
     @Test
-    void interfaceDefaultToDefaultIsNotElevated() throws Throwable {
+    void interfaceCallElevatesPerActualReceiver() throws Throwable {
         ClassNode cn = transformedNode(IfaceSamples.class);
+        assertTrue(hasMethod(cn, "leaf$async"));
+        assertTrue(hasMethod(cn, "indirect$async"), "interface default-to-default elevates via Strategy B");
 
-        // leaf awaits directly → sound to pair; indirect reaches suspension only through an
-        // INVOKEINTERFACE call, which is not statically bound → must not be elevated.
-        assertTrue(hasMethod(cn, "leaf$async"), "direct awaiter should still get its pair");
-        assertFalse(hasMethod(cn, "indirect$async"), "INVOKEINTERFACE dispatch must not be elevated");
-
-        // the direct awaiter still works on a non-overriding implementer
         byte[] iface = AsyncTransformer.transformInPlace(classBytes(IfaceSamples.class));
         Map<String, byte[]> classes = new HashMap<>();
         classes.put(IfaceSamples.class.getName(), iface);
         classes.put(IfaceSamples.Impl.class.getName(), classBytes(IfaceSamples.Impl.class));
+        classes.put(IfaceSamples.OverridingImpl.class.getName(), classBytes(IfaceSamples.OverridingImpl.class));
         ClassLoader loader = new InMemoryClassLoader(classes, ElevateDispatchTest.class.getClassLoader());
+
         Class<?> impl = Class.forName(IfaceSamples.Impl.class.getName(), true, loader);
-        Object inst = newInstance(impl);
-        // getMethod (unlike getDeclaredMethods) resolves the inherited default sibling
-        Method async = impl.getMethod("leaf$async", CompletableFuture.class);
-        Object f = async.invoke(inst, later(5));
-        assertEquals(6, ((CompletableFuture<?>) f).get(5, TimeUnit.SECONDS));   // await(5) + 1
-        assertEquals(6, impl.getMethod("leaf", CompletableFuture.class).invoke(inst, done(5)));
+        Object i = newInstance(impl);
+        assertEquals(60, blockingVia(impl, i, "indirect", done(5)));        // (await(5)+1) * 10
+        assertEquals(60, asyncVia(impl, i, "indirect", later(5)));          // suspends through the default leaf
+
+        Class<?> ovr = Class.forName(IfaceSamples.OverridingImpl.class.getName(), true, loader);
+        Object o = newInstance(ovr);
+        assertEquals(9990, blockingVia(ovr, o, "indirect", done(5)));       // 999 * 10 — override ignores f
+        assertEquals(9990, asyncVia(ovr, o, "indirect", later(5)));         // Strategy B runs the override, not the default
     }
 }

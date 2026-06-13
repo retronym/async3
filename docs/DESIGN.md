@@ -490,20 +490,19 @@ suspendable method, not just those that await directly: `invoke g` becomes
 state-machine transform treats the injected marker as an ordinary suspension
 point. So `int indirect(f) { return leaf(f) * 10; }` — no source `await` — gets a
 real `indirect$async` that suspends through `leaf$async`. Closure and rewrite are
-restricted to one class per pass (the only scope where the callee's `$async`
-entry is guaranteed to exist) **and to statically bound calls**:
-`INVOKESTATIC`, `INVOKESPECIAL`/private, and `INVOKEVIRTUAL` only to a `final`
-method or in a `final` class. A virtually dispatched callee
-(`INVOKEINTERFACE`, or `INVOKEVIRTUAL` to an overridable method) is *not*
-elevated — a subclass could override `g` without a matching `g$async`, so the
-rewritten call would run this class's body where the blocking call dispatched
-to the override (a miscompilation, caught by a regression test on an interface
-default method). Such calls are left blocking, so suspension stops at the
-dispatch boundary; resolving virtual targets soundly is the runtime witness's
-job (it elevates against the *observed* receiver). The blocking original is
-preserved byte-identical, re-entry is idempotent, and callers this transform
-cannot rewrite are quietly left on the blocking tier. What remains is the
-*runtime* half — discovering
+restricted to one class per pass (the only scope where suspendability of the
+target can be detected statically). The *dispatch* of each elevated call is
+handled by one of two mechanisms (`elevate` chooses by `dispatchSafe`):
+**statically bound** calls (`INVOKESTATIC`, `INVOKESPECIAL`/private,
+`INVOKEVIRTUAL` to a `final` method or in a `final` class) rewrite directly to
+the sibling `g$async`; **virtually dispatched** calls (`INVOKEINTERFACE`, or
+`INVOKEVIRTUAL` to an overridable method) rewrite to a call-site
+`invokedynamic` that resolves the suspending entry against the *actual
+receiver* at runtime (§7.8). The latter is what makes elevation through an
+overridden interface default sound — the very case the direct rewrite had to
+refuse. The blocking original is preserved byte-identical, re-entry is
+idempotent, and callers this transform cannot rewrite are quietly left on the
+blocking tier. What remains is the *runtime* half — discovering
 *which* indirect methods are worth elevating (the `StackWalker` witness), the
 cross-class closure with on-demand hidden siblings, and the indy edge flip.
 
@@ -511,6 +510,49 @@ This is userland Loom's tiering done by observation: tier 0 runs and blocks;
 the blocking await profiles itself; hot blocking stacks are elevated frame by
 frame up to the boundary, with virtual dispatch and the open world handled for
 free because every elevation is backed by a witnessed execution.
+
+## 7.8 Elevating through virtual dispatch (Strategy B — implemented)
+
+Rewriting `invoke g` → `await(g$async)` is unsound for a virtually dispatched
+`g`: `g$async` is an independent method with its own override tree, so a
+subclass can override `g` without a matching `g$async`, and the rewrite runs
+the wrong body (demonstrated: an interface default `indirect` calling `leaf`,
+with one implementer overriding `leaf` — `indirect$async` ran the interface's
+`leaf`, not the override). Two ways to make the two override trees parallel:
+
+- **(A) Scaffold the callee hierarchy** — declare `g$async` as a contract
+  member parallel to `g`, with a default body that is the blocking shim
+  `completedFuture(this.g(args))` (so any receiver, processed or not, runs its
+  *own* `g` via virtual dispatch), overridden by the real state machine where a
+  body is suspendable. Sound and open-world-safe, but it requires a
+  declaration-site color (`@Suspendable`) on the type at the call site, because
+  the call site binds `g$async` against a possibly-abstract supertype where
+  suspendability is invisible — and `retransformClasses` cannot add the member
+  later. This is the Kotlin `suspend` / Optimus `$queued` shape.
+
+- **(B) Scaffold the call site** — *implemented here* (`async3.runtime.Elevation`).
+  The virtual call rewrites to
+  `invokedynamic g (receiver, args) -> CompletableFuture [bootstrap, blockingDesc]`
+  followed by the usual `await`. The bootstrap's call site, per actual receiver
+  class (an inline cache via `ClassValue`), finds that receiver's *real* `g`
+  (honouring overrides and inherited interface defaults), transforms just that
+  method with `transformMethod`, defines it as a hidden `NESTMATE` of the body's
+  declaring class, and invokes it. Soundness comes from resolving against the
+  runtime receiver, not a static type: a non-awaiting override transforms to a
+  state machine with no suspension points (completes synchronously, like the
+  blocking shim) while a suspendable body really suspends — each running its own
+  `g`. **No `$async` members or annotations on the callee hierarchy**, and new
+  receiver classes (the open world) are handled on first encounter.
+
+The transform keeps the direct `g$async` rewrite for statically bound calls
+(cheaper, no call-site machinery) and uses (B) only where dispatch is virtual.
+(B) is the eager form of §7.7's runtime witness — same per-receiver resolution,
+triggered at transform time rather than by a hot sample. Limitation: the
+per-receiver transform is single-method (it elevates `g`'s own awaits, not
+transitive blocking inside `g`) — the same scope as `Async.lift`. Verified by
+`ElevateDispatchTest`: an overridden interface default and an overridable
+virtual call both elevate and agree with the blocking tier (`Impl` suspends →
+60; `OverridingImpl` runs its override → 9990).
 
 ## 8. Prototype plan
 
@@ -571,15 +613,16 @@ deliberately not used, to keep iteration friction low.
   suspendable if it directly awaits or transitively calls one that does, monotone
   fixpoint, cycle-safe) and elevates each suspendable method — `invoke g`
   rewritten to `await(g$async(...))` with the result coerced back to `g`'s return
-  type, so a method with no source `await` still becomes a state machine. Only
-  statically bound calls are elevated (static/special/final); virtual and
-  interface dispatch is left blocking, since an override may lack a matching
-  `$async`. The blocking original is untouched, re-entry stays idempotent, and
-  unsupported callers (synchronized/monitor/ctor) are quietly left blocking
-  rather than aborting the class. Tested in `ElevateTest` (primitive/object/void
-  coercions, multi-level, mixed direct+indirect, fast path vs. real suspension)
-  and `ElevateDispatchTest` (virtual/interface calls not elevated; final calls
-  are).
+  type, so a method with no source `await` still becomes a state machine.
+  Statically bound calls rewrite directly to `g$async`; virtual/interface calls
+  rewrite to a per-receiver `invokedynamic` call site (§7.8, Strategy B) that is
+  sound under overriding with no callee-hierarchy scaffolding. The blocking
+  original is untouched, re-entry stays idempotent, and unsupported callers
+  (synchronized/monitor/ctor) are quietly left blocking rather than aborting the
+  class. Tested in `ElevateTest` (primitive/object/void coercions, multi-level,
+  mixed direct+indirect, fast path vs. real suspension) and `ElevateDispatchTest`
+  (interface-default and overridable-virtual calls elevate and agree with the
+  blocking tier, per actual receiver).
   *Remaining (runtime-only, not unit-testable):* witness-driven discovery
   (`StackWalker` sample from the blocking-`await` slow path) to decide *when* to
   elevate; cross-class closure with on-demand hidden-class siblings; indy/

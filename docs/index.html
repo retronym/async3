@@ -344,6 +344,28 @@ h2{font-family:var(--serif);font-style:italic;font-weight:400;font-size:clamp(30
 .thread.released .tdot{background:var(--green)}
 .thread.released .tlabel,.thread.released .tstate{color:var(--green)}
 
+/* elevation — Strategy B polymorphic call site */
+.dispatch{margin-top:18px;border:1px solid var(--line);background:var(--panel-2);padding:24px 24px}
+.callsite{border:1px solid var(--amber-dim);background:linear-gradient(180deg,rgba(255,180,84,.06),var(--panel) 72%);padding:12px 16px;font-size:12.5px;color:var(--amber);text-align:center}
+.fanlabel{text-align:center;color:var(--faint);font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:12px 0}
+.recv-row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.recv{font-family:var(--mono);font-size:13px;background:none;border:1px solid var(--line);color:var(--ink);padding:10px 20px;cursor:pointer;transition:all .25s}
+.recv:hover{border-color:var(--dim)}
+.recv.on{border-color:var(--teal);color:var(--teal);background:rgba(86,216,196,.07)}
+.resolve{margin-top:20px;display:grid;grid-template-columns:1.1fr .9fr;gap:16px}
+.resolve .panel{border:1px solid var(--line);background:var(--panel);padding:18px 20px}
+.resolve .lbl2{font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim);margin-bottom:12px}
+.resolve .lbl2 b{color:var(--teal)}
+.resolve pre{font-size:12.5px;line-height:1.75;color:var(--ink);overflow-x:auto}
+.resolve pre .cm{color:var(--faint)}.resolve pre .aw{color:var(--amber);font-weight:700}
+.resolve pre .t2{color:var(--teal)}.resolve pre .k{color:#c792ea}
+.outcome div{margin-bottom:12px;font-size:13px;color:var(--dim)}
+.outcome .badge2{font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:3px 10px;border:1px solid var(--line)}
+.outcome .badge2.yes{border-color:var(--red);color:var(--red)}
+.outcome .badge2.no{border-color:var(--green);color:var(--green)}
+.outcome .res{color:#eef3fa;font-size:15px;margin-bottom:0}
+.outcome .res b{color:var(--amber)}
+
 /* ---- footer ---- */
 footer{
   margin-top:130px;border-top:1px solid var(--line);padding:54px 28px 70px;
@@ -628,12 +650,36 @@ bipush 10; imul              <span class="cm">// …the original * 10</span></pr
     </div>
   </div>
 
-  <p class="lede" style="margin-top:24px">A monotone fixpoint over the call graph finds every suspendable method
-  (cycles and recursion converge); the blocking original is left <b>byte-identical</b>, and the elevated result
-  matches it exactly — <b>verified blocking ≡ elevated</b>, fast path and real suspension. The within-a-class
-  rewrite above is <b>implemented</b>; the witness-driven flip shown here — <code>StackWalker</code> sampling,
-  on-demand hidden siblings, the <code>MutableCallSite</code> edge — is the runtime tier in the
-  <a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">design doc §7.7</a>.</p>
+  <p class="lede" style="margin-top:36px">One catch: some of those calls dispatch <i>virtually</i> — an interface
+  default calling another, or an overridable method. Rewriting them to a fixed <code>leaf$async</code> would be
+  unsound: a subclass can override <code>leaf</code> without one. <b>Strategy B</b> rewrites the call to an
+  <code>invokedynamic</code> that resolves the suspending entry against the <b>actual receiver</b> — no
+  <code>$async</code> on the interface at all. Pick a receiver:</p>
+
+  <div class="dispatch">
+    <div class="callsite">invokedynamic <b>leaf</b>(receiver, f) → CompletableFuture&nbsp;&nbsp;[Elevation.bootstrap]</div>
+    <div class="fanlabel">↓ resolves on receiver.getClass() · ClassValue inline cache · transforms that body on first sight</div>
+    <div class="recv-row">
+      <button class="recv on" id="recv_impl" data-r="impl">Impl</button>
+      <button class="recv" id="recv_ovr" data-r="ovr">OverridingImpl</button>
+    </div>
+    <div class="resolve">
+      <div class="panel">
+        <div class="lbl2">resolved leaf — declared in <b id="declIn">IfaceSamples</b></div>
+        <pre id="bodyPre"></pre>
+      </div>
+      <div class="panel outcome" id="outcome"></div>
+    </div>
+  </div>
+
+  <p class="lede" style="margin-top:24px">Sound under overriding because resolution is against the runtime receiver,
+  not a static type: an override that doesn't await transforms to a state machine with no suspension points
+  (completes synchronously), while an awaiting body really suspends — each running its <b>own</b> <code>leaf</code>.
+  The blocking original is left <b>byte-identical</b> and the elevated result matches it exactly —
+  <b>verified blocking ≡ elevated</b>, per receiver. The static within-class rewrite and this call-site
+  dispatch are <b>implemented</b>; the witness-driven flip in the machine above — <code>StackWalker</code>
+  sampling, the <code>MutableCallSite</code> edge — is the runtime tier in the
+  <a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">design doc §7.7</a>/§7.8.</p>
 </section>
 
 <footer>
@@ -933,6 +979,33 @@ new IntersectionObserver(es=>{
   new IntersectionObserver(es=>{
     if(!played&&es[0].isIntersecting){played=true;setTimeout(play,400);}
   },{threshold:.4}).observe(document.querySelector(".elevm"));
+})();
+
+/* ---------- Strategy B: per-receiver call-site resolution ---------- */
+(function(){
+  const $=id=>document.getElementById(id);
+  const RECV={
+    impl:{decl:"IfaceSamples <span class='cm'>(inherited default)</span>",
+      body:'<span class="k">int</span> <span class="t2">leaf</span>(CompletableFuture&lt;Integer&gt; f) {\n    <span class="k">return</span> <span class="aw">await</span>(f) + <span class="t2">1</span>;\n}',
+      susp:true,sLabel:"suspends on f",leaf:"await(5) + 1 = 6",result:'indirect = 6 * 10 = <b>60</b>'},
+    ovr:{decl:"OverridingImpl <span class='cm'>(override)</span>",
+      body:'<span class="k">int</span> <span class="t2">leaf</span>(CompletableFuture&lt;Integer&gt; f) {\n    <span class="k">return</span> <span class="t2">999</span>;   <span class="cm">// ignores f</span>\n}',
+      susp:false,sLabel:"completes synchronously",leaf:"999 (no await)",result:'indirect = 999 * 10 = <b>9990</b>'}
+  };
+  function pick(r){
+    const d=RECV[r];
+    $("recv_impl").classList.toggle("on",r==="impl");
+    $("recv_ovr").classList.toggle("on",r==="ovr");
+    $("declIn").innerHTML=d.decl;
+    $("bodyPre").innerHTML=d.body;
+    $("outcome").innerHTML=
+      `<div>transformed to a state machine with <b style="color:var(--ink)">${d.susp?"1 suspension point":"0 suspension points"}</b></div>`+
+      `<div><span class="badge2 ${d.susp?"yes":"no"}">${d.sLabel}</span></div>`+
+      `<div>leaf ▸ ${d.leaf}</div>`+
+      `<div class="res">${d.result}</div>`;
+  }
+  document.querySelectorAll(".recv").forEach(b=>b.onclick=()=>pick(b.dataset.r));
+  pick("impl");
 })();
 </script>
 </body>

@@ -76,6 +76,11 @@ public final class AsyncTransformer {
     /** Descriptor of the externalized resumable body: {@code (stateMachine, tr) -> void}. */
     static final String BODY_DESC = "(" + FSM_DESC + "Ljava/lang/Object;)V";
 
+    /** Strategy-B bootstrap for elevating a virtually dispatched call at the call site. */
+    static final Handle ELEVATE_BSM = new Handle(H_INVOKESTATIC, "async3/runtime/Elevation", "bootstrap",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;"
+                    + "Ljava/lang/String;)Ljava/lang/invoke/CallSite;", false);
+
     public static final class Result {
         /** Binary name of the (patched) host class. */
         public String hostName;
@@ -405,19 +410,19 @@ public final class AsyncTransformer {
     /**
      * The set of methods in {@code cn} that are <em>suspendable</em>: they either call the
      * {@code await} marker directly, or (transitively) call another suspendable method of the
-     * same class through a {@linkplain #dispatchSafe statically bound} call. This is the in-class
-     * slice of §7.7's call-graph closure — the static analogue of the runtime stack witness. A
-     * suspendable method that this transform cannot rewrite (constructor, {@code synchronized},
-     * monitor) is left out, so suspension simply stops at that boundary rather than aborting the
-     * class; a method that <em>directly</em> awaits but is unsupported is still seeded here and
-     * rejected loudly by {@link #checkSupported} downstream, preserving the existing diagnostics.
+     * same class. This is the in-class slice of §7.7's call-graph closure — the static analogue
+     * of the runtime stack witness. A suspendable method that this transform cannot rewrite
+     * (constructor, {@code synchronized}, monitor) is left out, so suspension simply stops at
+     * that boundary rather than aborting the class; a method that <em>directly</em> awaits but is
+     * unsupported is still seeded here and rejected loudly by {@link #checkSupported} downstream,
+     * preserving the existing diagnostics.
      *
      * <p>Computed as a monotone fixpoint over the same-class call graph, so cycles (recursion,
-     * mutual recursion) converge correctly. Only same-class, statically bound edges are followed:
-     * elevating a call to {@code g} requires {@code g$async} to exist (guaranteed only for
-     * {@code cn}'s own methods, within one {@code transformInPlace} pass) and to dispatch
-     * identically to {@code g} (guaranteed only when the call is not virtual — see
-     * {@link #dispatchSafe}). Cross-class and virtual elevation are deferred (docs/DESIGN.md §7.7).
+     * mutual recursion) converge correctly. Both statically bound and virtually dispatched edges
+     * are followed: {@link #elevate} rewrites the former directly to {@code g$async} and the latter
+     * to a Strategy-B {@code invokedynamic} call site that resolves the suspending entry per actual
+     * receiver (see {@link async3.runtime.Elevation}). Only same-class edges are followed, since
+     * detecting suspendability of a cross-class target needs the wider closure deferred to §7.7.
      */
     private static Set<String> suspendableMethods(ClassNode cn) {
         Set<String> suspendable = new LinkedHashSet<>();
@@ -431,7 +436,7 @@ public final class AsyncTransformer {
                 if (unsupportedReason(mn) != null) continue; // cannot be elevated: stop suspension here
                 for (AbstractInsnNode insn : mn.instructions)
                     if (insn instanceof MethodInsnNode mi
-                            && dispatchSafe(cn, mi) && suspendable.contains(methodKey(mi))) {
+                            && mi.owner.equals(cn.name) && suspendable.contains(methodKey(mi))) {
                         suspendable.add(methodKey(mn));
                         grew = true;
                         break;
@@ -443,25 +448,45 @@ public final class AsyncTransformer {
 
     /**
      * Retargets each call to a suspendable sibling so that {@code mn} suspends through it instead
-     * of blocking on it: {@code invoke g(args)R} becomes {@code await(g$async(args))}, coerced
+     * of blocking on it: {@code invoke g(args)R} becomes {@code await(<entry>(args))}, coerced
      * back to {@code R}. The injected {@code await} marker is an ordinary suspension point that
      * the downstream state-machine transform turns into a park/resume site like any author-written
      * one — so {@code mn} need not contain a single source-level {@code await} to become a state
-     * machine. The {@code $async} entry shares {@code g}'s parameter descriptor (only the return
-     * type changes to {@code CompletableFuture}) and is invoked with the same opcode and receiver,
-     * so the operand stack at the call is unchanged.
+     * machine. The operand stack at the call is unchanged: {@code <entry>} consumes the same
+     * receiver and arguments and returns a {@code CompletableFuture}.
+     *
+     * <p>The entry differs by how the call dispatches ({@link #dispatchSafe}):
+     * <ul>
+     *   <li><b>statically bound</b> (static/special/final): a direct call to the sibling
+     *       {@code g$async} generated in this same class — cheap, no call-site machinery;</li>
+     *   <li><b>virtually dispatched</b> (interface, or overridable virtual): a Strategy-B
+     *       {@code invokedynamic} whose bootstrap ({@link async3.runtime.Elevation}) resolves the
+     *       suspending entry against the <em>actual receiver</em> at runtime, so an override runs
+     *       its own body — sound where a static {@code g$async} call would not be, and needing no
+     *       scaffolding on the callee hierarchy.</li>
+     * </ul>
      */
     private static void elevate(ClassNode cn, MethodNode mn, Set<String> suspendable) {
         List<MethodInsnNode> calls = new ArrayList<>();
         for (AbstractInsnNode insn : mn.instructions)
             if (insn instanceof MethodInsnNode mi
-                    && dispatchSafe(cn, mi) && suspendable.contains(methodKey(mi)))
+                    && mi.owner.equals(cn.name) && suspendable.contains(methodKey(mi)))
                 calls.add(mi);
         for (MethodInsnNode mi : calls) {
             Type ret = Type.getReturnType(mi.desc);
-            String asyncDesc = Type.getMethodDescriptor(Type.getObjectType(CF), Type.getArgumentTypes(mi.desc));
+            Type[] args = Type.getArgumentTypes(mi.desc);
             InsnList repl = new InsnList();
-            repl.add(new MethodInsnNode(mi.getOpcode(), mi.owner, mi.name + "$async", asyncDesc, mi.itf));
+            if (dispatchSafe(cn, mi)) {
+                String asyncDesc = Type.getMethodDescriptor(Type.getObjectType(CF), args);
+                repl.add(new MethodInsnNode(mi.getOpcode(), mi.owner, mi.name + "$async", asyncDesc, mi.itf));
+            } else {
+                // virtual/interface: resolve per actual receiver at the call site (Strategy B).
+                Type[] indyParams = new Type[args.length + 1];
+                indyParams[0] = Type.getObjectType(mi.owner);   // the receiver
+                System.arraycopy(args, 0, indyParams, 1, args.length);
+                String indyDesc = Type.getMethodDescriptor(Type.getObjectType(CF), indyParams);
+                repl.add(new InvokeDynamicInsnNode(mi.name, indyDesc, ELEVATE_BSM, mi.desc));
+            }
             repl.add(new MethodInsnNode(INVOKESTATIC, AWAIT_OWNER, AWAIT_NAME, AWAIT_DESC, false));
             repl.add(coerceFromObject(ret));
             mn.instructions.insertBefore(mi, repl);
