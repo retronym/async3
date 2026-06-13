@@ -241,9 +241,11 @@ frame metadata; `AsyncDebug.describe`; LVT/line-number carry-over; the agent, th
 `async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging;
 **transitive elevation** — a method that blocks only because it calls a suspendable sibling
 (no `await` of its own) gets a suspending `$async` variant too, the agent rewriting
-`invoke g` to `await(g$async(...))` for every suspendable same-class callee (the static
-in-class slice of the "elevate the blocking tier" design, docs/DESIGN.md §7.7).
-60 tests, including a semantic matrix running every sample blocking vs. transformed, fast
+`invoke g` to `await(g$async(...))` for every suspendable same-class callee reached through a
+statically bound call (virtual/interface dispatch is left blocking, since an override may lack a
+matching `$async`) — the static in-class slice of the "elevate the blocking tier" design,
+docs/DESIGN.md §7.7.
+62 tests, including a semantic matrix running every sample blocking vs. transformed, fast
 path vs. real suspension.
 
 **Rejected with diagnostics** (rather than miscompiled): await under a monitor, await in

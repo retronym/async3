@@ -638,7 +638,7 @@ bipush 10; imul              <span class="cm">// …the original * 10</span></pr
 
 <footer>
   <div class="big">Suspension with a non-empty operand stack: <em>1 + (2 * await(f)) + mul(await(g), 3)</em> — the case ANF exists to forbid. <em>It just works here.</em></div>
-  <pre>git clone … && mvn test   <span style="color:var(--faint)"># 60 green</span></pre>
+  <pre>git clone … && mvn test   <span style="color:var(--faint)"># 62 green</span></pre>
   <div class="links">
     <a href="https://github.com/retronym/async3">repository</a> ·
     <a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">design doc</a> ·
@@ -663,7 +663,7 @@ bipush 10; imul              <span class="cm">// …the original * 10</span></pr
     col.innerHTML=html;host.appendChild(col);
   }
   const m=document.getElementById("marq");
-  const items=["<b>tableswitch</b> on state","spill → <b>prims[2]</b>","fast path: <b>getCompleted</b>","liveness → <b>aconst_null · aastore</b>","park → <b>onComplete</b>","resume in <b>apply()</b>","LVT carried over — <b>x = 5</b> by name","<b>NEW-sinking</b> for new Foo(await(f))","<b>elevation</b>: invoke g → await(g$async)","60 tests · blocking ≡ transformed"];
+  const items=["<b>tableswitch</b> on state","spill → <b>prims[2]</b>","fast path: <b>getCompleted</b>","liveness → <b>aconst_null · aastore</b>","park → <b>onComplete</b>","resume in <b>apply()</b>","LVT carried over — <b>x = 5</b> by name","<b>NEW-sinking</b> for new Foo(await(f))","<b>elevation</b>: invoke g → await(g$async)","62 tests · blocking ≡ transformed"];
   m.innerHTML=(items.map(i=>`<span>${i}</span>`).join("")).repeat(2);
 })();
 

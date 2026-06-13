@@ -491,9 +491,19 @@ state-machine transform treats the injected marker as an ordinary suspension
 point. So `int indirect(f) { return leaf(f) * 10; }` — no source `await` — gets a
 real `indirect$async` that suspends through `leaf$async`. Closure and rewrite are
 restricted to one class per pass (the only scope where the callee's `$async`
-entry is guaranteed to exist); the blocking original is preserved byte-identical,
-re-entry is idempotent, and callers this transform cannot rewrite are quietly
-left on the blocking tier. What remains is the *runtime* half — discovering
+entry is guaranteed to exist) **and to statically bound calls**:
+`INVOKESTATIC`, `INVOKESPECIAL`/private, and `INVOKEVIRTUAL` only to a `final`
+method or in a `final` class. A virtually dispatched callee
+(`INVOKEINTERFACE`, or `INVOKEVIRTUAL` to an overridable method) is *not*
+elevated — a subclass could override `g` without a matching `g$async`, so the
+rewritten call would run this class's body where the blocking call dispatched
+to the override (a miscompilation, caught by a regression test on an interface
+default method). Such calls are left blocking, so suspension stops at the
+dispatch boundary; resolving virtual targets soundly is the runtime witness's
+job (it elevates against the *observed* receiver). The blocking original is
+preserved byte-identical, re-entry is idempotent, and callers this transform
+cannot rewrite are quietly left on the blocking tier. What remains is the
+*runtime* half — discovering
 *which* indirect methods are worth elevating (the `StackWalker` witness), the
 cross-class closure with on-demand hidden siblings, and the indy edge flip.
 
@@ -561,11 +571,15 @@ deliberately not used, to keep iteration friction low.
   suspendable if it directly awaits or transitively calls one that does, monotone
   fixpoint, cycle-safe) and elevates each suspendable method — `invoke g`
   rewritten to `await(g$async(...))` with the result coerced back to `g`'s return
-  type, so a method with no source `await` still becomes a state machine. The
-  blocking original is untouched, re-entry stays idempotent, and unsupported
-  callers (synchronized/monitor/ctor) are quietly left blocking rather than
-  aborting the class. Tested in `ElevateTest` (primitive/object/void coercions,
-  multi-level, mixed direct+indirect, fast path vs. real suspension).
+  type, so a method with no source `await` still becomes a state machine. Only
+  statically bound calls are elevated (static/special/final); virtual and
+  interface dispatch is left blocking, since an override may lack a matching
+  `$async`. The blocking original is untouched, re-entry stays idempotent, and
+  unsupported callers (synchronized/monitor/ctor) are quietly left blocking
+  rather than aborting the class. Tested in `ElevateTest` (primitive/object/void
+  coercions, multi-level, mixed direct+indirect, fast path vs. real suspension)
+  and `ElevateDispatchTest` (virtual/interface calls not elevated; final calls
+  are).
   *Remaining (runtime-only, not unit-testable):* witness-driven discovery
   (`StackWalker` sample from the blocking-`await` slow path) to decide *when* to
   elevate; cross-class closure with on-demand hidden-class siblings; indy/

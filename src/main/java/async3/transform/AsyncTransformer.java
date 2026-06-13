@@ -365,22 +365,59 @@ public final class AsyncTransformer {
 
     private static String methodKey(MethodInsnNode mi) { return mi.name + mi.desc; }
 
+    private static MethodNode findMethod(ClassNode cn, String name, String desc) {
+        for (MethodNode m : cn.methods)
+            if (m.name.equals(name) && m.desc.equals(desc)) return m;
+        return null;
+    }
+
+    /**
+     * Whether a call to a same-class sibling is <em>statically bound</em>, and so safe to retarget
+     * to {@code g$async}. Elevation rewrites {@code invoke g} into a call to {@code g$async}; that
+     * is only correct if the two dispatch to the <em>same</em> receiver method. For a virtually
+     * dispatched call ({@code INVOKEVIRTUAL}/{@code INVOKEINTERFACE} to an overridable method) it
+     * may not: a subclass can override {@code g} without supplying a matching {@code g$async}
+     * (because its override is not itself suspendable, or its class was not processed), so the
+     * rewritten call would resolve {@code g$async} to <em>this</em> class's body while the blocking
+     * call would have dispatched to the override — a miscompilation (verified: an interface default
+     * method elevated through {@code INVOKEINTERFACE} runs the wrong body under an override).
+     *
+     * <p>Statically bound, hence safe: {@code INVOKESTATIC} (no receiver); {@code INVOKESPECIAL}
+     * (private or super — never overridden at this site); {@code INVOKEVIRTUAL} only when the
+     * target method is {@code final}/{@code private} or its class is {@code final}. Everything else
+     * — notably {@code INVOKEINTERFACE} and virtual calls to overridable methods — is left blocking,
+     * so suspension simply stops at that dispatch boundary (the same conservative choice as for
+     * cross-class calls). Resolving virtual targets soundly is the runtime witness's job: it
+     * elevates against the <em>observed</em> receiver (docs/DESIGN.md §7.7).
+     */
+    private static boolean dispatchSafe(ClassNode cn, MethodInsnNode mi) {
+        if (!mi.owner.equals(cn.name)) return false; // cross-class: callee's $async not guaranteed
+        int op = mi.getOpcode();
+        if (op == INVOKESTATIC || op == INVOKESPECIAL) return true; // no virtual dispatch at this site
+        if (op == INVOKEVIRTUAL) {
+            if ((cn.access & ACC_FINAL) != 0) return true; // class cannot be subclassed
+            MethodNode target = findMethod(cn, mi.name, mi.desc);
+            return target != null && (target.access & (ACC_FINAL | ACC_PRIVATE)) != 0;
+        }
+        return false; // INVOKEINTERFACE and anything else: not statically bound
+    }
+
     /**
      * The set of methods in {@code cn} that are <em>suspendable</em>: they either call the
      * {@code await} marker directly, or (transitively) call another suspendable method of the
-     * same class. This is the in-class slice of §7.7's call-graph closure — the static analogue
-     * of the runtime stack witness. A suspendable method that this transform cannot rewrite
-     * (constructor, {@code synchronized}, monitor) is left out, so suspension simply stops at
-     * that boundary rather than aborting the class; a method that <em>directly</em> awaits but is
-     * unsupported is still seeded here and rejected loudly by {@link #checkSupported} downstream,
-     * preserving the existing diagnostics.
+     * same class through a {@linkplain #dispatchSafe statically bound} call. This is the in-class
+     * slice of §7.7's call-graph closure — the static analogue of the runtime stack witness. A
+     * suspendable method that this transform cannot rewrite (constructor, {@code synchronized},
+     * monitor) is left out, so suspension simply stops at that boundary rather than aborting the
+     * class; a method that <em>directly</em> awaits but is unsupported is still seeded here and
+     * rejected loudly by {@link #checkSupported} downstream, preserving the existing diagnostics.
      *
      * <p>Computed as a monotone fixpoint over the same-class call graph, so cycles (recursion,
-     * mutual recursion) converge correctly. Only same-class edges are followed: elevating a call
-     * to {@code g} requires {@code g$async} to exist, and within one {@code transformInPlace}
-     * pass that is guaranteed only for {@code cn}'s own methods. Cross-class elevation needs every
-     * class on the path to carry the pair (the agent's per-class processing) and a wider closure;
-     * deferred (see docs/DESIGN.md §7.7).
+     * mutual recursion) converge correctly. Only same-class, statically bound edges are followed:
+     * elevating a call to {@code g} requires {@code g$async} to exist (guaranteed only for
+     * {@code cn}'s own methods, within one {@code transformInPlace} pass) and to dispatch
+     * identically to {@code g} (guaranteed only when the call is not virtual — see
+     * {@link #dispatchSafe}). Cross-class and virtual elevation are deferred (docs/DESIGN.md §7.7).
      */
     private static Set<String> suspendableMethods(ClassNode cn) {
         Set<String> suspendable = new LinkedHashSet<>();
@@ -394,7 +431,7 @@ public final class AsyncTransformer {
                 if (unsupportedReason(mn) != null) continue; // cannot be elevated: stop suspension here
                 for (AbstractInsnNode insn : mn.instructions)
                     if (insn instanceof MethodInsnNode mi
-                            && mi.owner.equals(cn.name) && suspendable.contains(methodKey(mi))) {
+                            && dispatchSafe(cn, mi) && suspendable.contains(methodKey(mi))) {
                         suspendable.add(methodKey(mn));
                         grew = true;
                         break;
@@ -418,7 +455,7 @@ public final class AsyncTransformer {
         List<MethodInsnNode> calls = new ArrayList<>();
         for (AbstractInsnNode insn : mn.instructions)
             if (insn instanceof MethodInsnNode mi
-                    && mi.owner.equals(cn.name) && suspendable.contains(methodKey(mi)))
+                    && dispatchSafe(cn, mi) && suspendable.contains(methodKey(mi)))
                 calls.add(mi);
         for (MethodInsnNode mi : calls) {
             Type ret = Type.getReturnType(mi.desc);
