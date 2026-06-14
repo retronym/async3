@@ -11,7 +11,7 @@ Plain Java + ASM, no dependency on the Scala build. Design rationale, prior art,
 phased plan: [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
-mvn test                                              # 65 tests
+mvn test                                              # 68 tests
 mvn -q compile exec:java -Dexec.mainClass=async3.demo.Demo
 ```
 
@@ -286,7 +286,7 @@ What to expect while stepping:
 | System | Transform level | Suspension mechanism | vs. async3 |
 |---|---|---|---|
 | **Project Loom** (JDK 21+) | VM-internal (native stack copying) | Block on a virtual thread | Zero code changes, but JDK 21+ only; pinning in `synchronized`; collapses fork/join into sequential blocking — Optimus-style graph schedulers lose the dataflow graph |
-| **Kotlin coroutines** | Compiler backend (bytecode-level IR) | CPS; spills to typed fields of a generated `Continuation` class | Closest relative. Kotlin generates a class per coroutine; async3's generic two-array frame works identically at compile time and at runtime without per-method class generation |
+| **Kotlin coroutines** | Compiler backend (bytecode-level IR) | CPS; spills to typed fields of a generated `Continuation` class | Closest relative. Kotlin generates a class per coroutine; async3 offers the same `typed-fields` store (one field per live primitive/ref, JIT-hoistable) as well as a generic two-array frame that works without per-method class generation |
 | **scala-async / `AsyncPhase`** | Compiler, on typed trees | ANF + lifting into a state-machine class | The predecessor this project aims to replace. The tree-level complexity (ANF, symbol re-ownership, patmat interaction, value-class boxing) disappears at bytecode level |
 | **Quasar** | Agent / AoT ASM | Generic `Stack` (`long[]` + `Object[]`) | Same frame representation. Quasar is unmaintained and agent/AoT-only; async3 adds the runtime-triggered path (cracking + `defineHiddenClass`) and profile-driven tiering |
 | **Kilim / Javaflow** | AoT ASM | Stack capture via rewriting | Same family; Javaflow documents the uninitialized-object problem async3 solves with NEW-sinking |
@@ -311,8 +311,8 @@ full elevation/tiering story across [where the two meet](#where-the-two-meet-the
 — transitive elevation (a method that only blocks indirectly gets a suspending variant too),
 per-receiver `invokedynamic` for virtual/interface dispatch (sound under overriding), and the
 `StackWalker`-sampled tier promotion with chain elevation (a hot blocking chain suspends end-to-end).
-65 tests, including a semantic matrix running every sample blocking vs. transformed, fast
-path vs. real suspension.
+68 tests, including a semantic matrix running every sample blocking vs. transformed, fast
+path vs. real suspension, across all three frame stores.
 
 **Rejected with diagnostics** (rather than miscompiled): await under a monitor, await in
 constructors.
@@ -330,21 +330,25 @@ constructors.
 | [`agent/AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) | load-time agent (`Premain-Class` in the jar manifest) |
 | [`samples/`](src/main/java/async3/samples) | source-shape inputs; [`HandWrittenSumTwice`](src/main/java/async3/samples/HandWrittenSumTwice.java) is the expected output, by hand (phase 0) |
 | [`demo/Demo`](src/main/java/async3/demo/Demo.java) | the runnable walkthrough above |
+| [`bench/BenchmarkSamples`](src/main/java/async3/bench/BenchmarkSamples.java) | five source shapes covering the frame-store axes (single, wide, chain3, hotInner, loopAwait8) |
+| [`bench/FrameStoreBenchmark`](src/main/java/async3/bench/FrameStoreBenchmark.java) | JMH benchmark: transforms each sample under `array-spill`/`array-live`/`typed-fields` and measures fast-path and real-suspension cost |
 | [`src/test/java`](src/test/java) | semantic matrix, rejection tests, JDI breakpoint checks (`JdiAgentCheck`, `JdiShadowCheck`) |
 
 ## Future work
 
 - **Spill-store elision** — dead ref slots are already nulled rather than spilled; the
   remaining (purely throughput) refinement is skipping the stores and restores for dead prim
-  slots too. Measure with the JMH work below before bothering.
+  slots too.
 - **Completing the tier switch** — the profile-driven promotion exists for virtual call sites
   ([where the two meet](#where-the-two-meet-the-transform-rewires-calls-deployment-resolves-them)); still open are
   *de-elevation* when a path cools (the promotion is one-way today), the same blocking-start promotion on the
   statically bound `g$async` path (needs an indy there too), and `Can-Retransform-Classes` on the
   agent to rewire *already-loaded* caller bodies rather than relying on the caller being elevated at
   load.
-- **JMH numbers** — blocking vs. AoT-transformed vs. lazily promoted vs. the current compiler
-  phase's output; generic two-array frame vs. Kotlin-style typed fields.
+- **JMH numbers** — frame-store costs are measured (`FrameStoreBenchmark`; result: `typed-fields`
+  matches `array-spill` on hot loops, `array-live` is ~3.5× slower due to `prims[]` indirection).
+  Still open: blocking vs. AoT-transformed vs. lazily promoted vs. the current Scala compiler
+  phase's output.
 - **IDE debugger support** — the remaining stepping gap (step-over at a real suspension steps
   out) is the same one Kotlin closes with dedicated tooling, which is the model to follow:
   the IntelliJ Kotlin plugin's

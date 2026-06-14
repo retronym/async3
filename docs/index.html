@@ -408,8 +408,8 @@ footer .links a{margin:0 14px}
   <div class="kicker">async / await as a bytecode transform</div>
   <h1>The stack frame <em>leaves the thread.</em></h1>
   <p class="sub">You write an ordinary, <b>blocking</b> Java method. An ASM transform derives a suspending
-  sibling: a state machine that spills its live frame into <b>two arrays</b>, parks on the future,
-  and hands the thread back. No compiler plugin, no JDK 21, no class per method. <b>Watch it happen, opcode by opcode.</b></p>
+  sibling: a state machine that spills its live frame — into two generic arrays, or typed fields per local —
+  parks on the future, and hands the thread back. No compiler plugin, no JDK 21, no class per method. <b>Watch it happen, opcode by opcode.</b></p>
   <div class="cta">
     <a href="#machine">▶&nbsp; watch it suspend</a>
     <a class="ghost" href="https://github.com/retronym/async3">read the source</a>
@@ -711,7 +711,7 @@ bipush 10; imul              <span class="cm">// …the original * 10</span></pr
 
 <footer>
   <div class="big">Suspension with a non-empty operand stack: <em>1 + (2 * await(f)) + mul(await(g), 3)</em> — the case ANF exists to forbid. <em>It just works here.</em></div>
-  <pre>git clone … && mvn test   <span style="color:var(--faint)"># 65 green</span></pre>
+  <pre>git clone … && mvn test   <span style="color:var(--faint)"># 68 green</span></pre>
   <div class="links">
     <a href="https://github.com/retronym/async3">repository</a> ·
     <a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">design doc</a> ·
@@ -736,7 +736,7 @@ bipush 10; imul              <span class="cm">// …the original * 10</span></pr
     col.innerHTML=html;host.appendChild(col);
   }
   const m=document.getElementById("marq");
-  const items=["<b>tableswitch</b> on state","spill → <b>prims[2]</b>","fast path: <b>getCompleted</b>","liveness → <b>aconst_null · aastore</b>","park → <b>onComplete</b>","resume in <b>apply()</b>","LVT carried over — <b>x = 5</b> by name","<b>NEW-sinking</b> for new Foo(await(f))","<b>elevation</b>: invoke g → await(g$async)","62 tests · blocking ≡ transformed"];
+  const items=["<b>tableswitch</b> on state","spill → <b>prims[2]</b>","fast path: <b>getCompleted</b>","liveness → <b>aconst_null · aastore</b>","park → <b>onComplete</b>","resume in <b>apply()</b>","LVT carried over — <b>x = 5</b> by name","<b>NEW-sinking</b> for new Foo(await(f))","<b>elevation</b>: invoke g → await(g$async)","<b>typed-fields</b> · array-live · array-spill","68 tests · blocking ≡ transformed"];
   m.innerHTML=(items.map(i=>`<span>${i}</span>`).join("")).repeat(2);
 })();
 

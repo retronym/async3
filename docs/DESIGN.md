@@ -773,11 +773,13 @@ where typed fields make a shim pointless.
   transform entry, with `transformInPlace` applying the downgrade above.
 - **Later (profile-driven):** the dynamic tier-promotion already re-transforms
   hot methods at runtime (`Elevation.buildSuspending`). Extend `Profiler` to
-  record per-method live-set size and suspension frequency, and let the runtime
-  transform pick a store per method (large live-set + hot → `typed-fields`;
-  await-heavy with many locals → `array-live`; else the property default). The
-  property sets the floor; the profile overrides per method — no new mechanism,
-  it rides the promotion path that already exists.
+  record per-method suspension frequency and live-set size, and let the runtime
+  transform pick a store per method: hot with a non-trivial live-set →
+  `typed-fields` (no `prims[]` indirection; the JIT field-hoists to registers);
+  else the property default (`array-spill`). `array-live` has no role on the
+  elevated path — see Kotlin refinement below. The property sets the floor; the
+  profile overrides per method — no new mechanism, it rides the promotion path
+  that already exists.
 
 ### Cross-cutting
 
@@ -789,10 +791,17 @@ where typed fields make a shim pointless.
   state→field name and the debugger reads fields directly; `array-live` has no
   source slots — the throughput store, not the debugging one.
 
-A later refinement, not the baseline: Kotlin's emitted bytecode caches a field
-in a JVM local inside hot regions and writes the field only around suspensions —
-a register-allocation win for tight loops. That is a hybrid on top of the live
-model (a bounded local spill for hot locals); decide it with JMH.
+**JMH result (`FrameStoreBenchmark`, `hotInner_real`):** `array-live` pays ~3.5×
+the overhead of `array-spill` on the hot-loop case (270 ns vs. 77 ns). The cause
+is the `prims[]` array: a second heap object with its own header, creating a
+pointer indirection the JIT cannot register-hold across loop iterations.
+`typed-fields` avoids this — one field per primitive local, directly on the SM
+object — and the JIT field-hoists them to registers, matching `array-spill` at
+77 ns without a hybrid. Kotlin's refinement (caching typed fields in JVM locals
+inside hot regions, writing back only at suspensions) is the right intuition, but
+unnecessary when the JIT can hoist the fields directly. `array-live` remains the
+throughput store only for the cold/single-use path where allocation pressure
+matters more than per-access latency.
 
 ### Phases
 
