@@ -344,6 +344,9 @@ public final class AsyncTransformer {
      * profile-driven store selection: the runtime tier (see {@link async3.runtime.Elevation}) can
      * pick a store per hot method rather than taking the global default.
      */
+    /** Returns the per-instruction live-out local-slot sets for {@code mn}. For tooling. */
+    public static BitSet[] liveOut(MethodNode mn) { return Liveness.liveOut(mn); }
+
     public static SingleMethod transformMethodElevated(byte[] hostBytes, String methodName, String methodDesc,
                                                        String frameStore) {
         FrameMode mode = frameStore == null ? FrameMode.current() : FrameMode.from(frameStore);
