@@ -71,6 +71,9 @@ public final class AsyncTransformer {
     static final String FSM = "async3/runtime/FutureStateMachine";
     static final String FSM_DESC = "L" + FSM + ";";
     static final String DSM = "async3/runtime/DelegatingStateMachine";
+    static final String FRAMES = "async3/runtime/Frames";
+    static final String REFS_DESC = "[Ljava/lang/Object;";
+    static final String PRIMS_DESC = "[J";
     static final String CF = "java/util/concurrent/CompletableFuture";
     static final String CF_DESC = "L" + CF + ";";
     /** Descriptor of the externalized resumable body: {@code (stateMachine, tr) -> void}. */
@@ -978,30 +981,31 @@ public final class AsyncTransformer {
         if (isNullType(t)) return il; // restored as ACONST_NULL
         il.add(new VarInsnNode(ALOAD, smLocal));
         if (isRef(t)) {
-            il.add(new FieldInsnNode(GETFIELD, FSM, "refs", "[Ljava/lang/Object;"));
+            il.add(new FieldInsnNode(GETFIELD, FSM, "refs", REFS_DESC));
             il.add(pushInt(frameIdx));
             il.add(new VarInsnNode(ALOAD, localIdx));
-            il.add(new InsnNode(AASTORE));
+            il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "setR", "(" + REFS_DESC + "ILjava/lang/Object;)V", false));
         } else {
-            il.add(new FieldInsnNode(GETFIELD, FSM, "prims", "[J"));
+            il.add(new FieldInsnNode(GETFIELD, FSM, "prims", PRIMS_DESC));
             il.add(pushInt(frameIdx));
             switch (t.getSort()) {
                 case Type.FLOAT -> {
                     il.add(new VarInsnNode(FLOAD, localIdx));
-                    il.add(new MethodInsnNode(INVOKESTATIC, "java/lang/Float", "floatToRawIntBits", "(F)I", false));
-                    il.add(new InsnNode(I2L));
+                    il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "fsetP", "(" + PRIMS_DESC + "IF)V", false));
                 }
-                case Type.LONG -> il.add(new VarInsnNode(LLOAD, localIdx));
+                case Type.LONG -> {
+                    il.add(new VarInsnNode(LLOAD, localIdx));
+                    il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "lsetP", "(" + PRIMS_DESC + "IJ)V", false));
+                }
                 case Type.DOUBLE -> {
                     il.add(new VarInsnNode(DLOAD, localIdx));
-                    il.add(new MethodInsnNode(INVOKESTATIC, "java/lang/Double", "doubleToRawLongBits", "(D)J", false));
+                    il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "dsetP", "(" + PRIMS_DESC + "ID)V", false));
                 }
                 default -> { // boolean/byte/char/short/int
                     il.add(new VarInsnNode(ILOAD, localIdx));
-                    il.add(new InsnNode(I2L));
+                    il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "isetP", "(" + PRIMS_DESC + "II)V", false));
                 }
             }
-            il.add(new InsnNode(LASTORE));
         }
         return il;
     }
@@ -1015,24 +1019,19 @@ public final class AsyncTransformer {
         }
         il.add(new VarInsnNode(ALOAD, 0));
         if (isRef(t)) {
-            il.add(new FieldInsnNode(GETFIELD, FSM, "refs", "[Ljava/lang/Object;"));
+            il.add(new FieldInsnNode(GETFIELD, FSM, "refs", REFS_DESC));
             il.add(pushInt(frameIdx));
-            il.add(new InsnNode(AALOAD));
+            il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "getR", "(" + REFS_DESC + "I)Ljava/lang/Object;", false));
             if (!t.getInternalName().equals("java/lang/Object"))
                 il.add(new TypeInsnNode(CHECKCAST, t.getInternalName()));
         } else {
-            il.add(new FieldInsnNode(GETFIELD, FSM, "prims", "[J"));
+            il.add(new FieldInsnNode(GETFIELD, FSM, "prims", PRIMS_DESC));
             il.add(pushInt(frameIdx));
-            il.add(new InsnNode(LALOAD));
             switch (t.getSort()) {
-                case Type.FLOAT -> {
-                    il.add(new InsnNode(L2I));
-                    il.add(new MethodInsnNode(INVOKESTATIC, "java/lang/Float", "intBitsToFloat", "(I)F", false));
-                }
-                case Type.LONG -> {}
-                case Type.DOUBLE ->
-                    il.add(new MethodInsnNode(INVOKESTATIC, "java/lang/Double", "longBitsToDouble", "(J)D", false));
-                default -> il.add(new InsnNode(L2I));
+                case Type.FLOAT -> il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "fgetP", "(" + PRIMS_DESC + "I)F", false));
+                case Type.LONG -> il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "lgetP", "(" + PRIMS_DESC + "I)J", false));
+                case Type.DOUBLE -> il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "dgetP", "(" + PRIMS_DESC + "I)D", false));
+                default -> il.add(new MethodInsnNode(INVOKESTATIC, FRAMES, "igetP", "(" + PRIMS_DESC + "I)I", false));
             }
         }
         return il;
