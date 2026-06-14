@@ -796,16 +796,21 @@ model (a bounded local spill for hot locals); decide it with JMH.
 
 ### Phases
 
-1. **`Frames` helpers** — add the static accessors and route the existing
-   conversions through them (smaller bytecode, identical semantics). ✅ first.
-2. **`FrameStore` extraction** — lift the spill/restore/capture codegen behind a
-   transform-time strategy; reimplement today's behavior as `ArraySpillStore`;
-   wire the `-Dasync3.frame` policy and the agent downgrade.
-3. **`array-live`** — rewrite local accesses to `Frames` calls; suspend spills
-   the operand stack only.
-4. **`typed-fields`** — emit typed fields + state→field debug metadata; gate to
-   class-generating deployments.
-5. **Profile hook** — `Profiler`/`Elevation` pick a store per hot method.
+1. ✅ **`Frames` helpers** — static accessors; the existing conversions route
+   through them (smaller bytecode, identical semantics). Setters are
+   *value-first* so a live store can write a stack value with no scratch shuffle.
+2. ✅ **`array-live`** + the `-Dasync3.frame` policy (`AsyncTransformer.FrameMode`):
+   body local accesses become `Frames` calls, the suspension spills only the
+   operand stack, and no `LocalVariableTable` is emitted (no source slots). Held
+   to the matrix under the property by `ArrayLiveStoreTest`; `sumTwice$asyncBody`
+   shrinks 137→107 instructions vs `array-spill`. *Implemented as a transform-time
+   mode branch rather than a separate `FrameStore` strategy object — that
+   extraction is deferred until `typed-fields` makes a second class-generating
+   backend worth abstracting over.*
+3. **`typed-fields`** — emit typed fields + state→field debug metadata; gate to
+   class-generating deployments; downgrade to `array-spill` under the agent.
+4. **Profile hook** — `Profiler`/`Elevation` pick a store per hot method; JMH
+   across the three.
 
 The verification spine: the existing blocking ≡ transformed semantic matrix,
 run once per store via the system property, holds every store to identical

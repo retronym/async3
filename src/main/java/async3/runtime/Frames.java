@@ -14,22 +14,27 @@ package async3.runtime;
  *
  * <p>All of {@code boolean/byte/char/short/int} normalize to an {@code int} view ({@link #igetP}/
  * {@link #isetP}); the JVM treats those as ints on the stack anyway.
+ *
+ * <p>Setters take the value <em>first</em> (then array, then index). That order lets the
+ * {@code array-live} store rewrite a {@code STORE} instruction — whose value is already on top of
+ * the operand stack — by just pushing the array and index above it, with no scratch local or stack
+ * shuffle, including for two-slot {@code long}/{@code double} values.
  */
 public final class Frames {
     private Frames() {}
 
     public static int igetP(long[] p, int i) { return (int) p[i]; }
-    public static void isetP(long[] p, int i, int v) { p[i] = v; }
+    public static void isetP(int v, long[] p, int i) { p[i] = v; }
 
     public static long lgetP(long[] p, int i) { return p[i]; }
-    public static void lsetP(long[] p, int i, long v) { p[i] = v; }
+    public static void lsetP(long v, long[] p, int i) { p[i] = v; }
 
     public static float fgetP(long[] p, int i) { return Float.intBitsToFloat((int) p[i]); }
-    public static void fsetP(long[] p, int i, float v) { p[i] = Float.floatToRawIntBits(v); }
+    public static void fsetP(float v, long[] p, int i) { p[i] = Float.floatToRawIntBits(v); }
 
     public static double dgetP(long[] p, int i) { return Double.longBitsToDouble(p[i]); }
-    public static void dsetP(long[] p, int i, double v) { p[i] = Double.doubleToRawLongBits(v); }
+    public static void dsetP(double v, long[] p, int i) { p[i] = Double.doubleToRawLongBits(v); }
 
     public static Object getR(Object[] r, int i) { return r[i]; }
-    public static void setR(Object[] r, int i, Object v) { r[i] = v; }
+    public static void setR(Object v, Object[] r, int i) { r[i] = v; }
 }
