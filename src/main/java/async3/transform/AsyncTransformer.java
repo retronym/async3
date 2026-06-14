@@ -94,8 +94,9 @@ public final class AsyncTransformer {
      */
     enum FrameMode {
         ARRAY_SPILL, ARRAY_LIVE, TYPED_FIELDS;
-        static FrameMode current() {
-            String v = System.getProperty("async3.frame", "array-spill");
+        /** The global default, from {@code -Dasync3.frame}; a per-method override flows in as a parameter. */
+        static FrameMode current() { return from(System.getProperty("async3.frame", "array-spill")); }
+        static FrameMode from(String v) {
             return switch (v) {
                 case "array-spill" -> ARRAY_SPILL;
                 case "array-live" -> ARRAY_LIVE;
@@ -104,6 +105,8 @@ public final class AsyncTransformer {
                         "unknown async3.frame: " + v + " (expected array-spill | array-live | typed-fields)");
             };
         }
+        /** Honored only on a generated class; the agent's shared shell falls back to an array store. */
+        FrameMode withoutFields() { return this == TYPED_FIELDS ? ARRAY_SPILL : this; }
     }
 
     public static final class Result {
@@ -148,7 +151,7 @@ public final class AsyncTransformer {
                 cn.nestMembers.add(smName);
             }
             StringBuilder debug = new StringBuilder();
-            byte[] smBytes = generateStateMachine(cn, mn, smName, nestmate, debug);
+            byte[] smBytes = generateStateMachine(cn, mn, smName, nestmate, debug, FrameMode.current());
             result.stateMachines.put(smName.replace('/', '.'), smBytes);
             result.debugMetadata.put(result.hostName + "." + mn.name, debug.toString());
             entryPoints.add(entryPoint(cn, mn, smName));
@@ -202,10 +205,12 @@ public final class AsyncTransformer {
             String bodyName = uniqueMethodName(cn, added, mn.name + "$asyncBody");
             StringBuilder debug = new StringBuilder();
             debug.append("method ").append(cn.name).append('.').append(mn.name).append(mn.desc).append('\n');
-            // The shared-shell body has no per-method fields, so typed-fields downgrades to
-            // array-spill / array-live here (null plan); arrays live on the DelegatingStateMachine.
+            // The shared-shell body has no per-method fields, so typed-fields downgrades to an
+            // array store here; the arrays live on the DelegatingStateMachine (local 0).
+            FrameStore store = frameStore(FrameMode.current().withoutFields(), null, entry, work, frames,
+                    work.maxLocals + work.maxStack);
             added.add(applyMethod(work, entry, frames, debug, bodyName,
-                    ACC_PRIVATE | ACC_STATIC | ACC_SYNTHETIC, BODY_DESC, null));
+                    ACC_PRIVATE | ACC_STATIC | ACC_SYNTHETIC, BODY_DESC, store));
             added.add(inPlaceEntryPoint(cn, mn, entry, work.maxLocals + work.maxStack, bodyName, debug.toString()));
         }
         if (added.isEmpty()) return null;
@@ -300,7 +305,7 @@ public final class AsyncTransformer {
      * of the AoT path's NestMembers patching).
      */
     public static SingleMethod transformMethod(byte[] hostBytes, String methodName, String methodDesc) {
-        return transformMethod(hostBytes, methodName, methodDesc, false);
+        return transformMethod(hostBytes, methodName, methodDesc, false, false, FrameMode.current());
     }
 
     /**
@@ -316,7 +321,7 @@ public final class AsyncTransformer {
      */
     public static SingleMethod transformMethod(byte[] hostBytes, String methodName, String methodDesc,
                                                boolean shadowHostName) {
-        return transformMethod(hostBytes, methodName, methodDesc, shadowHostName, false);
+        return transformMethod(hostBytes, methodName, methodDesc, shadowHostName, false, FrameMode.current());
     }
 
     /**
@@ -328,11 +333,23 @@ public final class AsyncTransformer {
      * entry at runtime.
      */
     public static SingleMethod transformMethodElevated(byte[] hostBytes, String methodName, String methodDesc) {
-        return transformMethod(hostBytes, methodName, methodDesc, false, true);
+        return transformMethodElevated(hostBytes, methodName, methodDesc, null);
+    }
+
+    /**
+     * As above, but with an explicit frame-store name ({@code array-spill}/{@code array-live}/
+     * {@code typed-fields}), or null for the {@code -Dasync3.frame} default. This is the seam for
+     * profile-driven store selection: the runtime tier (see {@link async3.runtime.Elevation}) can
+     * pick a store per hot method rather than taking the global default.
+     */
+    public static SingleMethod transformMethodElevated(byte[] hostBytes, String methodName, String methodDesc,
+                                                       String frameStore) {
+        FrameMode mode = frameStore == null ? FrameMode.current() : FrameMode.from(frameStore);
+        return transformMethod(hostBytes, methodName, methodDesc, false, true, mode);
     }
 
     private static SingleMethod transformMethod(byte[] hostBytes, String methodName, String methodDesc,
-                                                boolean shadowHostName, boolean elevateVirtualCalls) {
+                                                boolean shadowHostName, boolean elevateVirtualCalls, FrameMode mode) {
         ClassNode cn = new ClassNode();
         new ClassReader(hostBytes).accept(cn, ClassReader.SKIP_FRAMES);
         MethodNode mn = null;
@@ -346,7 +363,8 @@ public final class AsyncTransformer {
         if (shadowHostName) checkNoHostReferences(cn, mn);
         String smName = shadowHostName ? cn.name : cn.name + "$async$" + methodName;
         StringBuilder debug = new StringBuilder();
-        byte[] bytes = generateStateMachine(cn, mn, smName, false, debug);
+        // a hidden class can host fields; the shadow path (separate loader) keeps it array-based
+        byte[] bytes = generateStateMachine(cn, mn, smName, false, debug, shadowHostName ? mode.withoutFields() : mode);
         String ctorDesc = Type.getMethodDescriptor(Type.VOID_TYPE, entryTypes(cn, mn));
         return new SingleMethod(smName.replace('/', '.'), bytes, ctorDesc, debug.toString());
     }
@@ -657,7 +675,7 @@ public final class AsyncTransformer {
     // ------------------------------------------------------------------ state machine class
 
     private static byte[] generateStateMachine(ClassNode cn, MethodNode mn, String smName,
-                                               boolean nestmate, StringBuilder debug) {
+                                               boolean nestmate, StringBuilder debug, FrameMode mode) {
         Type[] entry = entryTypes(cn, mn);
         Frame<BasicValue>[] frames = analyze(cn.name, mn);
 
@@ -675,14 +693,11 @@ public final class AsyncTransformer {
         // operand stack entry j <-> frame index maxLocals + j. Per-state reuse is automatic.
         int frameSlots = mn.maxLocals + mn.maxStack;
 
-        // typed-fields needs a generated class to hang fields on — available here (and in the
-        // hidden-class path), but not in the agent's shared shell, which downgrades to array-spill.
-        FieldPlan plan = FrameMode.current() == FrameMode.TYPED_FIELDS
-                ? FieldPlan.compute(smName, entry, mn, frames) : null;
-
-        sm.methods.add(constructor(entry, frameSlots, plan));
-        sm.methods.add(applyMethod(mn, entry, frames, debug, "apply", ACC_PUBLIC, "(Ljava/lang/Object;)V", plan));
-        if (plan != null) sm.fields.addAll(plan.fields());
+        // The generated class can host typed fields (and arrays); the store decides the layout.
+        FrameStore store = frameStore(mode, smName, entry, mn, frames, frameSlots);
+        sm.methods.add(constructor(entry, store));
+        sm.methods.add(applyMethod(mn, entry, frames, debug, "apply", ACC_PUBLIC, "(Ljava/lang/Object;)V", store));
+        store.declare(sm);
 
         sm.fields.add(new FieldNode(ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
                 "$asyncDebug", "Ljava/lang/String;", null, debug.toString()));
@@ -692,28 +707,19 @@ public final class AsyncTransformer {
         return cw.toByteArray();
     }
 
-    private static MethodNode constructor(Type[] entry, int frameSlots, FieldPlan plan) {
+    private static MethodNode constructor(Type[] entry, FrameStore store) {
         MethodNode ctor = new MethodNode(ACC_PUBLIC, "<init>",
                 Type.getMethodDescriptor(Type.VOID_TYPE, entry), null, null);
         InsnList il = ctor.instructions;
         il.add(new VarInsnNode(ALOAD, 0));
-        int arrays = plan != null ? 0 : frameSlots; // typed-fields needs no backing arrays
-        il.add(pushInt(arrays));
-        il.add(pushInt(arrays));
+        il.add(pushInt(store.superRefSlots()));
+        il.add(pushInt(store.superPrimSlots()));
         il.add(new MethodInsnNode(INVOKESPECIAL, FSM, "<init>", "(II)V", false));
         // Capture constructor arguments ([this,] params) into their entry frame slots; the dispatch
-        // switch's case 0 restores them (array stores), or they simply live there (live stores).
+        // switch's case 0 restores them (array-spill), or they simply live there (live stores).
         int ctorLocal = 1, paramSlot = 0;
         for (Type t : entry) {
-            if (plan != null) {
-                if (!isNullType(t)) {
-                    il.add(new VarInsnNode(ALOAD, 0));
-                    il.add(new VarInsnNode(t.getOpcode(ILOAD), ctorLocal));
-                    il.add(new FieldInsnNode(PUTFIELD, plan.owner(), plan.field(paramSlot, t), fieldDesc(t)));
-                }
-            } else {
-                il.add(spillFromLocal(t, ctorLocal, paramSlot));
-            }
+            il.add(store.captureFromLocal(paramSlot, t, ctorLocal));
             ctorLocal += t.getSize();
             paramSlot += t.getSize();
         }
@@ -730,13 +736,12 @@ public final class AsyncTransformer {
      */
     private static MethodNode applyMethod(MethodNode mn, Type[] entry, Frame<BasicValue>[] frames,
                                           StringBuilder debug, String name, int access, String desc,
-                                          FieldPlan plan) {
+                                          FrameStore store) {
         MethodNode apply = new MethodNode(access, name, desc, null, null);
         Type returnType = Type.getReturnType(mn.desc);
-        // typed: locals/stack live in typed fields (plan present — only on a generated class).
-        // live: locals live in the frame (no spill/restore), via fields (typed) or the two arrays.
-        final boolean typed = plan != null;
-        final boolean live = typed || FrameMode.current() == FrameMode.ARRAY_LIVE;
+        // live: the local's home is the frame (no spill/restore at suspensions), so the body's
+        // local accesses are rewritten in place; otherwise locals stay in JVM slots (array-spill).
+        final boolean live = store.rewritesBody();
 
         // apply's local layout: 0 = this, 1 = tr, [2, 2+maxLocals) = original locals,
         // then a scratch slot for the awaited future and a 2-wide scratch for spills/boxing.
@@ -783,22 +788,25 @@ public final class AsyncTransformer {
                 Frame<BasicValue> f = frames[idx];
                 if (f == null) throw new IllegalStateException("unreachable await call");
                 body.add(awaitSite(state, f, mn.maxLocals, OFF, futTmp, scratch, resume[state],
-                        liveOut[idx], refSlots, live, plan));
+                        liveOut[idx], refSlots, store));
                 appendDebug(debug, mn, insn, state, f, liveOut[idx]);
             } else if (insn.getOpcode() >= IRETURN && insn.getOpcode() <= RETURN) {
                 body.add(returnSite(returnType, scratch));
             } else if (live && insn instanceof VarInsnNode v && v.var < mn.maxLocals) {
-                // live store: the local's home is the frame slot (a field, or an array slot) — touch it in place
+                // the local's home is the frame slot — read/write it in place via the store
                 int op = v.getOpcode();
                 if (op >= ISTORE && op <= ASTORE) {
-                    body.add(typed ? typedStore(plan, op, v.var, scratch) : liveStore(op, v.var));
+                    body.add(store.store(v.var, varType(op), scratch));
                 } else {
                     Frame<BasicValue> f = frames[idx];
                     Type refType = op == ALOAD && f != null ? f.getLocal(v.var).getType() : null;
-                    body.add(typed ? typedLoad(plan, op, v.var, refType) : liveLoad(op, v.var, refType));
+                    body.add(store.load(v.var, varType(op), refType));
                 }
             } else if (live && insn instanceof IincInsnNode ii && ii.var < mn.maxLocals) {
-                body.add(typed ? typedIinc(plan, ii.var, ii.incr, scratch) : liveIinc(ii.var, ii.incr));
+                body.add(store.load(ii.var, Type.INT_TYPE, null));
+                body.add(pushInt(ii.incr));
+                body.add(new InsnNode(IADD));
+                body.add(store.store(ii.var, Type.INT_TYPE, scratch));
             } else {
                 AbstractInsnNode c = insn.clone(labelMap);
                 if (c instanceof VarInsnNode v) v.var += OFF;
@@ -814,10 +822,11 @@ public final class AsyncTransformer {
         il.add(new TableSwitchInsnNode(0, n, dflt, cases));
 
         il.add(cases[0]);
-        if (!live) { // array-live: entry params already live in the frame, accessed in place
+        if (!live) { // live stores keep entry params in the frame, accessed in place
             int slot = 0;
             for (Type t : entry) {
-                il.add(restoreToLocal(t, slot, OFF + slot));
+                il.add(store.load(slot, t, t));
+                il.add(new VarInsnNode(isNullType(t) ? ASTORE : t.getOpcode(ISTORE), OFF + slot));
                 slot += t.getSize();
             }
         }
@@ -826,17 +835,18 @@ public final class AsyncTransformer {
         for (int i = 1; i <= n; i++) {
             il.add(cases[i]);
             Frame<BasicValue> f = frames[mn.instructions.indexOf(awaits.get(i - 1))];
-            if (!live) { // array-live restores no locals — only the operand stack (below)
+            if (!live) { // live stores restore no locals — only the operand stack (below)
                 for (int v = 0; v < mn.maxLocals; v++) {
                     BasicValue value = f.getLocal(v);
                     if (!isSpillable(value)) continue;
-                    il.add(restoreToLocal(value.getType(), v, OFF + v));
+                    Type t = value.getType();
+                    il.add(store.load(v, t, t));
+                    il.add(new VarInsnNode(isNullType(t) ? ASTORE : t.getOpcode(ISTORE), OFF + v));
                 }
             }
             for (int j = 0; j < f.getStackSize() - 1; j++) {
                 Type st = f.getStack(j).getType();
-                if (typed && !isNullType(st)) il.add(fieldGet(plan, mn.maxLocals + j, st, st));
-                else il.add(restorePush(st, mn.maxLocals + j)); // handles null + the array path
+                il.add(store.load(mn.maxLocals + j, st, st)); // store.load handles null → ACONST_NULL
             }
             il.add(new JumpInsnNode(GOTO, resume[i]));
         }
@@ -893,7 +903,7 @@ public final class AsyncTransformer {
      */
     private static InsnList awaitSite(int state, Frame<BasicValue> f, int maxLocals,
                                       int off, int futTmp, int scratch, LabelNode resumeLabel,
-                                      BitSet live, BitSet refSlots, boolean liveFrame, FieldPlan plan) {
+                                      BitSet live, BitSet refSlots, FrameStore store) {
         InsnList il = new InsnList();
         LabelNode fast = new LabelNode();
 
@@ -924,7 +934,7 @@ public final class AsyncTransformer {
                 if (!live.get(v)) continue; // dead ref: slot nulled below instead
                 written.set(v);
             }
-            if (!liveFrame) il.add(spillFromLocal(t, off + v, v));
+            if (!store.rewritesBody()) il.add(store.captureFromLocal(v, t, off + v));
         }
         // ... and the operand stack below the future, popped top-down via the scratch local
         // (stack values are live by construction: the original code consumes them after resume)
@@ -932,30 +942,12 @@ public final class AsyncTransformer {
             BasicValue value = f.getStack(j);
             requireInitialized(value);
             Type t = value.getType();
-            if (isNullType(t)) {
-                il.add(new InsnNode(POP));
-            } else {
-                if (isRef(t)) written.set(maxLocals + j);
-                if (plan != null) {
-                    il.add(fieldPutFromStack(plan, maxLocals + j, t, scratch));
-                } else {
-                    il.add(new VarInsnNode(t.getOpcode(ISTORE), scratch));
-                    il.add(spillFromLocal(t, scratch, maxLocals + j));
-                }
-            }
+            if (isRef(t) && !isNullType(t)) written.set(maxLocals + j);
+            il.add(store.store(maxLocals + j, t, scratch)); // null-typed → POP (restored as ACONST_NULL)
         }
         // null every ref slot not written at this state
         for (int s = refSlots.nextSetBit(0); s >= 0; s = refSlots.nextSetBit(s + 1)) {
-            if (written.get(s)) continue;
-            if (plan != null) {
-                if (plan.field(s, OBJECT) != null) il.add(fieldNull(plan, s)); // no ref field → nothing to null
-            } else {
-                il.add(new VarInsnNode(ALOAD, 0));
-                il.add(new FieldInsnNode(GETFIELD, FSM, "refs", "[Ljava/lang/Object;"));
-                il.add(pushInt(s));
-                il.add(new InsnNode(ACONST_NULL));
-                il.add(new InsnNode(AASTORE));
-            }
+            if (!written.get(s)) il.add(store.nullRef(s));
         }
         il.add(new VarInsnNode(ALOAD, 0));
         il.add(new VarInsnNode(ALOAD, futTmp));
@@ -1064,27 +1056,7 @@ public final class AsyncTransformer {
         return il;
     }
 
-    /** Pushes the value in frame slot {@code frameIdx} onto the operand stack, typed as {@code t}. */
-    private static InsnList restorePush(Type t, int frameIdx) {
-        InsnList il = new InsnList();
-        if (isNullType(t)) {
-            il.add(new InsnNode(ACONST_NULL));
-            return il;
-        }
-        il.add(new VarInsnNode(ALOAD, 0));
-        il.add(frameArrayField(t));
-        il.add(pushInt(frameIdx));
-        if (isRef(t)) {
-            il.add(refGet());
-            if (!t.getInternalName().equals("java/lang/Object"))
-                il.add(new TypeInsnNode(CHECKCAST, t.getInternalName()));
-        } else {
-            il.add(primGet(t));
-        }
-        return il;
-    }
-
-    // ---- shared Frames accessor nodes (used by both array-spill spill/restore and array-live) ----
+    // ---- shared Frames accessor nodes (used by ArrayStore and constructor capture) ----
 
     private static FieldInsnNode frameArrayField(Type t) {
         return isRef(t) ? new FieldInsnNode(GETFIELD, FSM, "refs", REFS_DESC)
@@ -1131,59 +1103,6 @@ public final class AsyncTransformer {
             case DLOAD, DSTORE -> Type.DOUBLE_TYPE;
             default -> Type.INT_TYPE;
         };
-    }
-
-    /** array-live: push local {@code var}'s value from its frame slot ({@code refType} is the ALOAD type). */
-    private static InsnList liveLoad(int opcode, int var, Type refType) {
-        InsnList il = new InsnList();
-        il.add(new VarInsnNode(ALOAD, 0)); // the state machine, whose arrays hold the frame
-        if (opcode == ALOAD) {
-            il.add(frameArrayField(OBJECT));
-            il.add(pushInt(var));
-            il.add(refGet());
-            if (refType != null && (refType.getSort() == Type.OBJECT || refType.getSort() == Type.ARRAY)
-                    && !refType.getInternalName().equals("java/lang/Object"))
-                il.add(new TypeInsnNode(CHECKCAST, refType.getInternalName()));
-        } else {
-            Type t = primType(opcode);
-            il.add(frameArrayField(t));
-            il.add(pushInt(var));
-            il.add(primGet(t));
-        }
-        return il;
-    }
-
-    /** array-live: pop the stack value into local {@code var}'s frame slot (value-first setters). */
-    private static InsnList liveStore(int opcode, int var) {
-        InsnList il = new InsnList();
-        il.add(new VarInsnNode(ALOAD, 0)); // pushed above the value already on the stack
-        if (opcode == ASTORE) {
-            il.add(frameArrayField(OBJECT));
-            il.add(pushInt(var));
-            il.add(refSet());
-        } else {
-            Type t = primType(opcode);
-            il.add(frameArrayField(t));
-            il.add(pushInt(var));
-            il.add(primSet(t));
-        }
-        return il;
-    }
-
-    /** array-live: {@code prims[var] += incr}, in place. */
-    private static InsnList liveIinc(int var, int incr) {
-        InsnList il = new InsnList();
-        il.add(new VarInsnNode(ALOAD, 0));
-        il.add(frameArrayField(Type.INT_TYPE));
-        il.add(pushInt(var));
-        il.add(primGet(Type.INT_TYPE));
-        il.add(pushInt(incr));
-        il.add(new InsnNode(IADD));
-        il.add(new VarInsnNode(ALOAD, 0)); // value-first store
-        il.add(frameArrayField(Type.INT_TYPE));
-        il.add(pushInt(var));
-        il.add(primSet(Type.INT_TYPE));
-        return il;
     }
 
     // ---- typed-fields: a precisely-typed field per (frame slot, kind) the method touches ----
@@ -1293,28 +1212,116 @@ public final class AsyncTransformer {
         return il;
     }
 
-    private static InsnList typedLoad(FieldPlan plan, int opcode, int var, Type refType) {
-        Type t = varType(opcode);
-        return fieldGet(plan, var, t, opcode == ALOAD ? refType : null);
+    // ---- FrameStore: the one strategy the codegen calls for every frame-slot access ----
+
+    /**
+     * Where a captured value lives and how the body reaches it (docs/DESIGN.md §9). The codegen is
+     * store-agnostic: it asks the store to {@link #load}/{@link #store}/{@link #nullRef} a frame
+     * slot and to {@link #captureFromLocal capture} an entry param, and the store emits the right
+     * bytecode (two arrays, or typed fields). {@link #rewritesBody} distinguishes the <em>live</em>
+     * stores (the slot is the variable's home, accessed in place) from the spill store (the variable
+     * lives in a JVM slot and is copied in/out only at suspensions). All slots are addressed by
+     * frame index (local slot v, or operand-stack entry j at {@code maxLocals + j}); the state
+     * machine is always local 0.
+     */
+    abstract static class FrameStore {
+        abstract boolean rewritesBody();
+        abstract int superRefSlots();
+        abstract int superPrimSlots();
+        void declare(ClassNode sm) {}
+        /** Constructor capture: move entry param in JVM local {@code localIdx} into frame {@code slot}. */
+        abstract InsnList captureFromLocal(int slot, Type t, int localIdx);
+        /** Push frame slot {@code slot} (typed {@code t}); {@code refType} is the checkcast for references. */
+        abstract InsnList load(int slot, Type t, Type refType);
+        /** Pop the stack value into frame slot {@code slot}; {@code scratch} is a free 2-wide local. */
+        abstract InsnList store(int slot, Type t, int scratch);
+        /** Null a dead reference slot (the {@code fieldsToNullOut} analogue). */
+        abstract InsnList nullRef(int slot);
     }
 
-    private static InsnList typedStore(FieldPlan plan, int opcode, int var, int scratch) {
-        return fieldPutFromStack(plan, var, varType(opcode), scratch);
+    static FrameStore frameStore(FrameMode mode, String smName, Type[] entry, MethodNode mn,
+                                 Frame<BasicValue>[] frames, int frameSlots) {
+        return switch (mode) {
+            case TYPED_FIELDS -> new FieldStore(FieldPlan.compute(smName, entry, mn, frames));
+            case ARRAY_LIVE -> new ArrayStore(frameSlots, true);
+            case ARRAY_SPILL -> new ArrayStore(frameSlots, false);
+        };
     }
 
-    private static InsnList typedIinc(FieldPlan plan, int var, int incr, int scratch) {
-        InsnList il = new InsnList();
-        il.add(fieldGet(plan, var, Type.INT_TYPE, null));
-        il.add(pushInt(incr));
-        il.add(new InsnNode(IADD));
-        il.add(fieldPutFromStack(plan, var, Type.INT_TYPE, scratch));
-        return il;
+    /** Generic two-array frame; {@code live} chooses the array-live vs. array-spill body shape. */
+    static final class ArrayStore extends FrameStore {
+        private final int frameSlots;
+        private final boolean live;
+        ArrayStore(int frameSlots, boolean live) { this.frameSlots = frameSlots; this.live = live; }
+        boolean rewritesBody() { return live; }
+        int superRefSlots() { return frameSlots; }
+        int superPrimSlots() { return frameSlots; }
+        InsnList captureFromLocal(int slot, Type t, int localIdx) { return spillFromLocal(t, localIdx, slot); }
+        InsnList load(int slot, Type t, Type refType) {
+            InsnList il = new InsnList();
+            if (isNullType(t)) { il.add(new InsnNode(ACONST_NULL)); return il; }
+            il.add(new VarInsnNode(ALOAD, 0));
+            il.add(frameArrayField(t));
+            il.add(pushInt(slot));
+            if (isRef(t)) {
+                il.add(refGet());
+                Type c = refType != null ? refType : t;
+                if ((c.getSort() == Type.OBJECT || c.getSort() == Type.ARRAY)
+                        && !c.getInternalName().equals("java/lang/Object"))
+                    il.add(new TypeInsnNode(CHECKCAST, c.getInternalName()));
+            } else {
+                il.add(primGet(t));
+            }
+            return il;
+        }
+        InsnList store(int slot, Type t, int scratch) {
+            InsnList il = new InsnList();
+            if (isNullType(t)) { il.add(new InsnNode(POP)); return il; } // restored as ACONST_NULL
+            il.add(new VarInsnNode(ALOAD, 0));     // value-first setters: push array + index above the value
+            il.add(frameArrayField(t));
+            il.add(pushInt(slot));
+            il.add(isRef(t) ? refSet() : primSet(t));
+            return il;
+        }
+        InsnList nullRef(int slot) {
+            InsnList il = new InsnList();
+            il.add(new VarInsnNode(ALOAD, 0));
+            il.add(new FieldInsnNode(GETFIELD, FSM, "refs", REFS_DESC));
+            il.add(pushInt(slot));
+            il.add(new InsnNode(ACONST_NULL));
+            il.add(new InsnNode(AASTORE));
+            return il;
+        }
     }
 
-    private static InsnList restoreToLocal(Type t, int frameIdx, int localIdx) {
-        InsnList il = restorePush(t, frameIdx);
-        il.add(new VarInsnNode(isNullType(t) ? ASTORE : t.getOpcode(ISTORE), localIdx));
-        return il;
+    /** Typed fields on the generated class (always live); the agent's shared shell never uses this. */
+    static final class FieldStore extends FrameStore {
+        private final FieldPlan plan;
+        FieldStore(FieldPlan plan) { this.plan = plan; }
+        boolean rewritesBody() { return true; }
+        int superRefSlots() { return 0; }   // no backing arrays
+        int superPrimSlots() { return 0; }
+        void declare(ClassNode sm) { sm.fields.addAll(plan.fields()); }
+        InsnList captureFromLocal(int slot, Type t, int localIdx) {
+            InsnList il = new InsnList();
+            if (isNullType(t)) return il;
+            il.add(new VarInsnNode(ALOAD, 0));
+            il.add(new VarInsnNode(t.getOpcode(ILOAD), localIdx));
+            il.add(new FieldInsnNode(PUTFIELD, plan.owner(), plan.field(slot, t), fieldDesc(t)));
+            return il;
+        }
+        InsnList load(int slot, Type t, Type refType) {
+            if (isNullType(t)) { InsnList il = new InsnList(); il.add(new InsnNode(ACONST_NULL)); return il; }
+            return fieldGet(plan, slot, t, isRef(t) ? (refType != null ? refType : t) : null);
+        }
+        InsnList store(int slot, Type t, int scratch) {
+            if (isNullType(t)) { InsnList il = new InsnList(); il.add(new InsnNode(POP)); return il; }
+            return fieldPutFromStack(plan, slot, t, scratch);
+        }
+        InsnList nullRef(int slot) {
+            if (plan.field(slot, OBJECT) == null) return new InsnList(); // slot never holds a ref field
+            return fieldNull(plan, slot);
+        }
     }
 
     private static InsnList box(Type t) {

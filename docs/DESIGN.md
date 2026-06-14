@@ -803,10 +803,8 @@ model (a bounded local spill for hot locals); decide it with JMH.
    body local accesses become `Frames` calls, the suspension spills only the
    operand stack, and no `LocalVariableTable` is emitted (no source slots). Held
    to the matrix under the property by `ArrayLiveStoreTest`; `sumTwice$asyncBody`
-   shrinks 137→107 instructions vs `array-spill`. *Implemented as a transform-time
-   mode branch rather than a separate `FrameStore` strategy object — that
-   extraction is deferred until `typed-fields` makes a second class-generating
-   backend worth abstracting over.*
+   shrinks 137→107 instructions vs `array-spill`. (First landed as a mode branch;
+   folded into the `FrameStore` strategy in phase 4.)
 3. ✅ **`typed-fields`** — `FieldPlan` allocates one field per (frame slot, kind)
    the method touches; `generateStateMachine` declares them on the SM class and
    the body reads/writes them in place (`getfield`/`putfield`, value stashed via
@@ -817,12 +815,24 @@ model (a bounded local spill for hot locals); decide it with JMH.
    long-normalization), but references use `Object` fields with a checkcast on
    load (like `array-live`) rather than precise per-type fields; field names are
    synthetic (`s3I`, `s5R`), not yet sourced from the LVT — so the debugger sees
-   typed fields but not source names. Both are refinements, not blockers. The
-   formal `FrameStore` strategy object is still folded into a transform-time
-   branch (array vs. field on a `FieldPlan`, live vs. spill on a flag); a clean
-   extraction can follow now that all three backends exist.
-4. **Profile hook** — `Profiler`/`Elevation` pick a store per hot method; JMH
-   across the three.
+   typed fields but not source names. Both are refinements, not blockers.
+4. ✅ **`FrameStore` extraction.** The three stores are now one strategy
+   (`AsyncTransformer.FrameStore`): `ArrayStore` (spill or live, on the two
+   arrays) and `FieldStore` (live, on typed fields). The codegen is
+   store-agnostic — `applyMethod`/`awaitSite`/the constructor ask the store to
+   `load`/`store`/`nullRef` a frame slot and to `captureFromLocal` an entry
+   param, and `rewritesBody()` selects the live vs. spill body shape. The
+   array-vs-field and live-vs-spill branches that were scattered through the
+   codegen collapsed into the store. The chosen `FrameMode` now flows as a
+   *parameter* from the public entry points (default `-Dasync3.frame`), not a
+   property re-read deep in the transform — so a per-method choice is just a
+   different argument.
+5. ✅ **Profile seam** (the integration point; policy still trivial).
+   `transformMethodElevated(…, String frameStore)` takes an explicit store, and
+   `Elevation.buildSuspending` passes `Profiler.preferredStore(methodKey)` (null
+   today → the global default) when it materializes a hot method. Teaching the
+   profiler to choose — keying on observed live-set size / suspension frequency
+   — is now a change to one method, plus the JMH numbers to choose by.
 
 The verification spine: the existing blocking ≡ transformed semantic matrix,
 run once per store via the system property, holds every store to identical

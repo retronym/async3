@@ -76,6 +76,17 @@ public final class Profiler {
         return HOT.contains(methodKey);
     }
 
+    /**
+     * Profile-driven frame-store choice for a method about to be elevated, or null to take the
+     * {@code -Dasync3.frame} default. The seam for docs/DESIGN.md §9 phase 5: a future policy keys
+     * on what this profiler observes (e.g. live-set size, suspension frequency) to return
+     * {@code "typed-fields"} / {@code "array-live"} / {@code "array-spill"} per hot method.
+     * {@link Elevation} passes the result to {@code AsyncTransformer.transformMethodElevated}.
+     */
+    public static String preferredStore(String methodKey) {
+        return null; // default policy: honor the global property
+    }
+
     /** {@link Elevation} reports a tier flip here, for visibility. */
     static void recordElevation() {
         elevations.incrementAndGet();

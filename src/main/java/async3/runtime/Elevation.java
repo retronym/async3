@@ -178,7 +178,10 @@ public final class Elevation {
                 }
                 // Elevated transform: g's own virtually dispatched suspendable calls become
                 // per-receiver call sites too, so suspension goes deeper than this one method.
-                AsyncTransformer.SingleMethod sm = AsyncTransformer.transformMethodElevated(declBytes, name, blockingDesc);
+                // The profiler may pick a frame store for this hot method (else the global default).
+                String frameStore = Profiler.preferredStore(decl.getName() + "." + name + blockingDesc);
+                AsyncTransformer.SingleMethod sm =
+                        AsyncTransformer.transformMethodElevated(declBytes, name, blockingDesc, frameStore);
 
                 MethodHandles.Lookup smLookup = MethodHandles.privateLookupIn(decl, caller)
                         .defineHiddenClass(sm.bytes, false, MethodHandles.Lookup.ClassOption.NESTMATE);
