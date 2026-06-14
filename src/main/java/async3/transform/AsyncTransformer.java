@@ -53,10 +53,12 @@ import static org.objectweb.asm.Opcodes.*;
  * (Observable difference: the class-initialization side effect of {@code NEW} moves after the
  * evaluation of the constructor arguments; Kotlin accepts the same.)
  *
- * <p>Spilling is liveness-aware for references: dead ref locals are not spilled and every ref
- * frame slot not written at a suspension point is nulled ({@link Liveness}, the bytecode
- * analogue of the tree transform's fieldsToNullOut), so a suspended frame never pins values
- * the resumed code cannot read. Primitives are spilled regardless (no pinning concern).
+ * <p>Both spill and restore are fully liveness-aware ({@link Liveness}): dead locals are skipped
+ * on both sides. At a suspension point dead ref slots are nulled (the bytecode analogue of the
+ * tree transform's fieldsToNullOut); dead prims are simply not written to the frame. On resume,
+ * dead locals — both refs and prims — are not restored into JVM slots. Liveness is transitive:
+ * a local dead at await[i] is dead at every subsequent await site too, so a skipped spill is
+ * never followed by a captureFromLocal that would read the resulting TOP slot.
  *
  * <p>Current limitations (deliberate, see docs/DESIGN.md): rejects suspension while a monitor
  * is held; await in constructors is rejected.
@@ -834,11 +836,14 @@ public final class AsyncTransformer {
 
         for (int i = 1; i <= n; i++) {
             il.add(cases[i]);
-            Frame<BasicValue> f = frames[mn.instructions.indexOf(awaits.get(i - 1))];
+            int awaitIdx = mn.instructions.indexOf(awaits.get(i - 1));
+            Frame<BasicValue> f = frames[awaitIdx];
             if (!live) { // live stores restore no locals — only the operand stack (below)
+                BitSet liveAtResume = liveOut[awaitIdx];
                 for (int v = 0; v < mn.maxLocals; v++) {
                     BasicValue value = f.getLocal(v);
                     if (!isSpillable(value)) continue;
+                    if (!liveAtResume.get(v)) continue; // dead after resume — skip
                     Type t = value.getType();
                     il.add(store.load(v, t, t));
                     il.add(new VarInsnNode(isNullType(t) ? ASTORE : t.getOpcode(ISTORE), OFF + v));
@@ -920,7 +925,7 @@ public final class AsyncTransformer {
         il.add(new JumpInsnNode(IFNONNULL, fast));
         il.add(new InsnNode(POP));
 
-        // park: spill assigned locals (live ones, for refs) ...
+        // park: spill live locals into the frame ...
         // In array-live the locals already live in the frame, so nothing is spilled here; we still
         // walk them to mark which ref slots hold a live value (so the nulling pass below leaves
         // those alone and nulls only the dead ones).
@@ -929,11 +934,9 @@ public final class AsyncTransformer {
             BasicValue value = f.getLocal(v);
             requireInitialized(value);
             if (!isSpillable(value)) continue;
+            if (!live.get(v)) continue; // dead: skip (dead refs are nulled below; dead prims omitted)
             Type t = value.getType();
-            if (isRef(t) && !isNullType(t)) {
-                if (!live.get(v)) continue; // dead ref: slot nulled below instead
-                written.set(v);
-            }
+            if (isRef(t) && !isNullType(t)) written.set(v);
             if (!store.rewritesBody()) il.add(store.captureFromLocal(v, t, off + v));
         }
         // ... and the operand stack below the future, popped top-down via the scratch local

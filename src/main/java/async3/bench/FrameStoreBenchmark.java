@@ -69,10 +69,19 @@ public class FrameStoreBenchmark {
     private MethodHandle chain3;
     private MethodHandle hotInner;
     private MethodHandle loopAwait8;
+    private MethodHandle awaitThenLoop;
 
     // ---- pre-completed futures for the fast path ----
 
     private static final CompletableFuture<Integer> F1 = CompletableFuture.completedFuture(1);
+    private static final CompletableFuture<Integer> F100 = CompletableFuture.completedFuture(100);
+
+    // array for awaitThenLoop: 100 elements, values 0..99
+    private static final int[] ARR;
+    static {
+        ARR = new int[100];
+        for (int i = 0; i < ARR.length; i++) ARR[i] = i;
+    }
     private static final CompletableFuture<Integer> F2 = CompletableFuture.completedFuture(2);
     private static final CompletableFuture<Integer> F3 = CompletableFuture.completedFuture(3);
 
@@ -104,11 +113,12 @@ public class FrameStoreBenchmark {
         ClassLoader loader  = BenchmarkSamples.class.getClassLoader();
         MethodHandles.Lookup lookup = BenchmarkSamples.lookup();
 
-        single     = buildHandle(lookup, loader, hostBytes, "single");
-        wide       = buildHandle(lookup, loader, hostBytes, "wide");
-        chain3     = buildHandle(lookup, loader, hostBytes, "chain3");
-        hotInner   = buildHandle(lookup, loader, hostBytes, "hotInner");
-        loopAwait8 = buildHandle(lookup, loader, hostBytes, "loopAwait8");
+        single       = buildHandle(lookup, loader, hostBytes, "single");
+        wide         = buildHandle(lookup, loader, hostBytes, "wide");
+        chain3       = buildHandle(lookup, loader, hostBytes, "chain3");
+        hotInner     = buildHandle(lookup, loader, hostBytes, "hotInner");
+        loopAwait8   = buildHandle(lookup, loader, hostBytes, "loopAwait8");
+        awaitThenLoop = buildHandle(lookup, loader, hostBytes, "awaitThenLoop");
     }
 
     /**
@@ -224,6 +234,27 @@ public class FrameStoreBenchmark {
         CompletableFuture<Object> r = (CompletableFuture<Object>) loopAwait8.invokeWithArguments((Object) fs);
         // Each complete fires the SM synchronously: the chain runs on this thread.
         for (int i = 0; i < 8; i++) fs[i].complete(i + 1);
+        return r.join();
+    }
+
+    // ---- 6. awaitThenLoop: await a bound, then loop up to it ----
+    // Hypothesis: hi is live across the suspension and therefore lives in a SM field for
+    // array-live / typed-fields, but is restored to a free JVM local for array-spill.
+    // The JIT hoists a local trivially; hoisting a field load from the loop condition
+    // requires alias analysis. array-live is expected worst (indexed array load);
+    // typed-fields may or may not hoist; array-spill is the baseline (always a local).
+
+    @Benchmark
+    public Object awaitThenLoop_fast() throws Throwable {
+        return join(awaitThenLoop.invokeWithArguments(F100, ARR));
+    }
+
+    @Benchmark
+    public Object awaitThenLoop_real() throws Throwable {
+        CompletableFuture<Integer> f = new CompletableFuture<>();
+        @SuppressWarnings("unchecked")
+        CompletableFuture<Object> r = (CompletableFuture<Object>) awaitThenLoop.invokeWithArguments(f, ARR);
+        f.complete(100);
         return r.join();
     }
 

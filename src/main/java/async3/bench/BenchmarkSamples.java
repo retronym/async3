@@ -86,6 +86,22 @@ public class BenchmarkSamples {
     }
 
     /**
+     * 6. Await-then-loop: one suspension to obtain a loop bound, then a loop up to that bound.
+     *
+     * <p>{@code hi} is live across the suspension so it lands in a SM field for
+     * {@code array-live} and {@code typed-fields}; {@code array-spill} restores it into a free
+     * JVM local slot before the loop. The JIT can trivially register-allocate a local; a field
+     * load in the loop condition requires alias analysis to hoist. This is the shape from the
+     * discussion: the loop bound is not a compile-time constant but a value produced by an await.
+     */
+    public static int awaitThenLoop(CompletableFuture<Integer> fhi, int[] arr) {
+        int hi = AsyncRT.await(fhi);
+        int x = 0;
+        for (int i = 0; i < hi && i < arr.length; i++) x += arr[i];
+        return x;
+    }
+
+    /**
      * Returns a full-access lookup whose lookup class is {@link BenchmarkSamples}, so
      * {@link MethodHandles#privateLookupIn} and {@code defineHiddenClass(NESTMATE)} work from the
      * benchmark setup code, which lives in a different class.
