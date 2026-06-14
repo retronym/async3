@@ -807,8 +807,20 @@ model (a bounded local spill for hot locals); decide it with JMH.
    mode branch rather than a separate `FrameStore` strategy object — that
    extraction is deferred until `typed-fields` makes a second class-generating
    backend worth abstracting over.*
-3. **`typed-fields`** — emit typed fields + state→field debug metadata; gate to
-   class-generating deployments; downgrade to `array-spill` under the agent.
+3. ✅ **`typed-fields`** — `FieldPlan` allocates one field per (frame slot, kind)
+   the method touches; `generateStateMachine` declares them on the SM class and
+   the body reads/writes them in place (`getfield`/`putfield`, value stashed via
+   the scratch local for store order). Honored on the class-per-method and
+   hidden-class paths; the agent's shared shell passes a null plan and so
+   downgrades to an array store. Held to the matrix by `TypedFieldsStoreTest`.
+   *Simplifications in this cut:* primitives get precisely-typed fields (no
+   long-normalization), but references use `Object` fields with a checkcast on
+   load (like `array-live`) rather than precise per-type fields; field names are
+   synthetic (`s3I`, `s5R`), not yet sourced from the LVT — so the debugger sees
+   typed fields but not source names. Both are refinements, not blockers. The
+   formal `FrameStore` strategy object is still folded into a transform-time
+   branch (array vs. field on a `FieldPlan`, live vs. spill on a flag); a clean
+   extraction can follow now that all three backends exist.
 4. **Profile hook** — `Profiler`/`Elevation` pick a store per hot method; JMH
    across the three.
 
