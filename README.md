@@ -25,7 +25,7 @@ async3 keeps two things apart on purpose, and this README follows the split:
   the suspending variant: ahead-of-time, at class load (the agent), or lazily at runtime; eagerly,
   or only where profiling says a path is hot.
 
-They meet at one **seam**: the transform *rewires calls* — a call to a method that itself suspends
+They meet in one place: the transform *rewires calls* — a call to a method that itself suspends
 becomes a suspension point — and the shape of that rewired edge (a sibling method vs. a runtime call
 site) is the single transform decision forced by a deployment constraint.
 
@@ -112,7 +112,7 @@ suspendable callees into suspension points*: `g(args)` becomes `await(g$async(ar
 to `g`'s return type — so a method with no `await` of its own still becomes a state machine when it
 calls one that does. The transform is parameterized by exactly this — *which* call edges to rewire,
 and *what shape* of entry to rewire them to — and is otherwise self-contained: the same machinery
-serves every deployment below. (That parameter is [the seam](#the-seam-the-transform-rewires-calls-deployment-resolves-them).)
+serves every deployment below. (That parameter is [where the two meet](#where-the-two-meet-the-transform-rewires-calls-deployment-resolves-them).)
 
 It handles the bytecode corners the tree-level ANF transform exists to forbid: a non-empty operand
 stack at the await (`1 + (2 * await(f)) + mul(await(g), 3)`), loops, try/catch/finally, two-slot
@@ -134,7 +134,7 @@ transform emits per state):
 The frame holds exactly what the resumed code can still read, under source names: at state 1
 only `fb` (`fa` was consumed by the first await and its slot is already nulled); at state 2
 only `x`. The demo also dumps every generated class to `target/transformed-classes/` for
-`javap -c -l -p` spelunking.
+reading with `javap -c -l -p`.
 
 ## Concern 2 · deployment — when the transform runs, and how callers reach it
 
@@ -147,7 +147,7 @@ output lives × how the caller reaches the suspending variant* — never in what
 | **load-time agent** (the default) | class load | **in the host class** — `m$asyncBody` + `m$async` siblings | the in-host `m$async` |
 | runtime `async`/`lift` fallback | first use | a hidden `NESTMATE` class | cracked lambda → cached handle |
 | Strategy-B call site | first virtual call | a hidden class, per receiver | an `invokedynamic` that resolves the actual receiver |
-| dynamic tier flip | hotness (a `StackWalker` witness) | (as above) | a call site that starts blocking, flips when hot |
+| dynamic tier promotion | hotness (a `StackWalker` sample) | (as above) | a call site that starts blocking, promotes when hot |
 
 The first four are about *materializing* the transform; the last is about *scheduling* it in time.
 "Tier 0 vs. tier 1" is a deployment property — the transform is identical across the whole table.
@@ -177,8 +177,7 @@ public static java.util.concurrent.CompletableFuture sumTwice$async(CompletableF
     31: invokevirtual #206  // start
 ```
 
-Consequences: private access is same-class access (no nestmate machinery), and — the
-headline — **the executing bytecode lives in the class the source lines belong to**, so IDE
+Consequences: private access is same-class access (no nestmate machinery), and — most important — **the executing bytecode lives in the class the source lines belong to**, so IDE
 line breakpoints inside lambda bodies and transformed methods bind and fire naturally.
 Running the probe under the agent:
 
@@ -236,7 +235,7 @@ times without the agent, once per lambda, first use only. The agent inverts this
 per class at load time prepares all N methods, and the runtime tier never reads bytecode at
 all.
 
-## The seam: the transform rewires calls, deployment resolves them
+## Where the two meet: the transform rewires calls, deployment resolves them
 
 The transform chooses the *shape* of each rewired call edge, but the choice is dictated by a
 deployment fact — this is the one place the two concerns are coupled:
@@ -250,17 +249,17 @@ deployment fact — this is the one place the two concerns are coupled:
   That is why virtual elevation lives at the call site, not in the callee hierarchy, and stays sound
   under overriding (an override that doesn't await transforms to a do-nothing state machine; one
   that does, suspends).
-- **The tier flip closes the loop.** A virtual call site starts on the blocking tier; the blocking
+- **The tier promotion closes the loop.** A virtual call site starts on the blocking tier; the blocking
   `await` profiles itself with a `StackWalker` sample
-  ([`Profiler`](src/main/java/async3/runtime/Profiler.java)) and the site flips to the transform
-  once the method is hot. On flip the transform re-runs *with rewiring on*, so the new machine's own
-  virtual calls become further call sites; and the witness counts the whole blocking chain, so a
-  deeper caller goes hot and flips too. The transform keeps emitting edges; deployment keeps
-  resolving them, one level per hot witness.
+  ([`Profiler`](src/main/java/async3/runtime/Profiler.java)) and the site promotes to the transform
+  once the method is hot. On promotion, the transform re-runs *with rewiring on*, so the new machine's own
+  virtual calls become further call sites; and the profiler counts the whole blocking chain, so a
+  deeper caller goes hot and promotes too. The transform keeps emitting edges; deployment keeps
+  resolving them, one level per hot sample.
 
 Design doc: [§7.7](docs/DESIGN.md#77-elevating-the-blocking-tier-transitive-suspension) /
 [§7.8](docs/DESIGN.md#78-elevating-through-virtual-dispatch-strategy-b--implemented) /
-[§7.9](docs/DESIGN.md#79-the-witness-driven-tier-flip-stackwalker--implemented).
+[§7.9](docs/DESIGN.md#79-the-profile-driven-tier-promotion-stackwalker--implemented).
 
 ## Debugging in IntelliJ
 
@@ -278,7 +277,7 @@ What to expect while stepping:
   spilled frame, or evaluate `async3.runtime.AsyncDebug.describe(this)` to get
   `...sumTwice(...) suspended at state 2 (line 23): fa = ..., x = 5`.
 - **Stepping over an await that actually suspends steps out of the method** — `apply` parks
-  and returns. That is faithful to what the machine does; put a breakpoint on the line after
+  and returns. That matches what the machine does; put a breakpoint on the line after
   the await to follow the logical flow — the same experience as Kotlin coroutines without
   their debugger plugin, and closed the same way (see [Future work](#future-work)).
 
@@ -293,8 +292,8 @@ What to expect while stepping:
 | **Kilim / Javaflow** | AoT ASM | Stack capture via rewriting | Same family; Javaflow documents the uninitialized-object problem async3 solves with NEW-sinking |
 
 The design doc's [§7](docs/DESIGN.md#7-the-runtime-deferred-tiered-variant) answers the Loom
-question in depth — the short version: this *is* userland Loom, and earns its keep where
-Loom's thread semantics don't fit, the sharpest case being fork/join dataflow that a graph
+question in depth — the short version: this *is* userland Loom, and is worth it where
+Loom's thread semantics don't fit, the clearest case being fork/join dataflow that a graph
 scheduler needs to see rather than block on.
 
 ## Status
@@ -308,10 +307,10 @@ of dead ref slots (a suspended frame pins only what the resumed code can still r
 analogue of scala-async's `fieldsToNullOut`); per-state `$asyncDebug`
 frame metadata; `AsyncDebug.describe`; LVT/line-number carry-over; the agent, the
 `async`/`lift` APIs, and the no-agent runtime fallback, each with JDI-verified debugging; and the
-full elevation/tiering story across [the seam](#the-seam-the-transform-rewires-calls-deployment-resolves-them)
+full elevation/tiering story across [where the two meet](#where-the-two-meet-the-transform-rewires-calls-deployment-resolves-them)
 — transitive elevation (a method that only blocks indirectly gets a suspending variant too),
 per-receiver `invokedynamic` for virtual/interface dispatch (sound under overriding), and the
-`StackWalker`-witnessed tier flip with chain elevation (a hot blocking chain suspends end-to-end).
+`StackWalker`-sampled tier promotion with chain elevation (a hot blocking chain suspends end-to-end).
 65 tests, including a semantic matrix running every sample blocking vs. transformed, fast
 path vs. real suspension.
 
@@ -324,8 +323,8 @@ constructors.
 |---|---|
 | [`runtime/AsyncRT`](src/main/java/async3/runtime/AsyncRT.java) | the `await` marker; default implementation blocks (tier 0) |
 | [`runtime/Async`](src/main/java/async3/runtime/Async.java) | lambda front end (cracking + `defineHiddenClass(NESTMATE)`), `lift`, shadow mode |
-| [`runtime/Elevation`](src/main/java/async3/runtime/Elevation.java) | Strategy-B call site: `invokedynamic` bootstrap resolving the suspending entry per actual receiver; starts blocking, flips when hot |
-| [`runtime/Profiler`](src/main/java/async3/runtime/Profiler.java) | the witness: `StackWalker` sample from the blocking `await` slow path; counts blocks per method, marks hot |
+| [`runtime/Elevation`](src/main/java/async3/runtime/Elevation.java) | Strategy-B call site: `invokedynamic` bootstrap resolving the suspending entry per actual receiver; starts blocking, promotes when hot |
+| [`runtime/Profiler`](src/main/java/async3/runtime/Profiler.java) | the profiler: `StackWalker` sample from the blocking `await` slow path; counts blocks per method, marks hot |
 | [`runtime/FutureStateMachine`](src/main/java/async3/runtime/FutureStateMachine.java) | state machine base; ABI mirrors `scala.tools.testkit.async.AsyncStateMachine`; the `refs`/`prims` frame |
 | [`transform/AsyncTransformer`](src/main/java/async3/transform/AsyncTransformer.java) | **the transform** (concern 1): single-method state machine + call rewiring (`elevate`); plus the deployment shapes it emits into — class-per-method, the agent's in-place siblings, and the runtime `transformMethod`/`transformMethodElevated` |
 | [`agent/AsyncAgent`](src/main/java/async3/agent/AsyncAgent.java) | load-time agent (`Premain-Class` in the jar manifest) |
@@ -338,13 +337,13 @@ constructors.
 - **Spill-store elision** — dead ref slots are already nulled rather than spilled; the
   remaining (purely throughput) refinement is skipping the stores and restores for dead prim
   slots too. Measure with the JMH work below before bothering.
-- **Completing the tier switch** — the witness-driven flip exists for virtual call sites
-  ([the seam](#the-seam-the-transform-rewires-calls-deployment-resolves-them)); still open are
-  *de-elevation* when a path cools (the flip is one-way today), the same blocking-start flip on the
+- **Completing the tier switch** — the profile-driven promotion exists for virtual call sites
+  ([where the two meet](#where-the-two-meet-the-transform-rewires-calls-deployment-resolves-them)); still open are
+  *de-elevation* when a path cools (the promotion is one-way today), the same blocking-start promotion on the
   statically bound `g$async` path (needs an indy there too), and `Can-Retransform-Classes` on the
   agent to rewire *already-loaded* caller bodies rather than relying on the caller being elevated at
   load.
-- **JMH numbers** — blocking vs. AoT-transformed vs. lazily flipped vs. the current compiler
+- **JMH numbers** — blocking vs. AoT-transformed vs. lazily promoted vs. the current compiler
   phase's output; generic two-array frame vs. Kotlin-style typed fields.
 - **IDE debugger support** — the remaining stepping gap (step-over at a real suspension steps
   out) is the same one Kotlin closes with dedicated tooling, which is the model to follow:
@@ -367,7 +366,7 @@ suspend against a *custom scheduler* with a *serializable frame* rather than par
   `await` code, persist the frame at each suspension, resume across restart/rebalance
   (Temporal/DBOS-style durable execution). A parked virtual thread can't be serialized, so
   Loom doesn't reach this.
-- **`await` inside a typed actor (Akka).** The ask-within-actor dance — a response-wrapper
+- **`await` inside a typed actor (Akka).** The ask-within-actor boilerplate — a response-wrapper
   message, a `become`/stash continuation, a second handler — is exactly the continuation this
   transform generates. With the mailbox+dispatcher as the scheduler, `await(ask(...))`
   suspends the *actor*, not a dispatcher thread, buffering messages per a declared policy and

@@ -203,7 +203,7 @@ Two distinct problems:
    `suspended at Foo.scala:42: x=1, items=List(...)`.
 
 Bonus: give frames a `parent` pointer to the awaiting frame and logical async
-stack traces (Kotlin's `CoroutineStackFrame`) fall out nearly for free. The
+stack traces (Kotlin's `CoroutineStackFrame`) fall out almost automatically. The
 consumer side is proven out by Kotlin's tooling: the IntelliJ plugin's
 [coroutine debugger](https://github.com/JetBrains/intellij-community/tree/master/plugins/kotlin/jvm-debugger/coroutines)
 (`PositionManager` + `AsyncStackTraceProvider` rendering suspended frames
@@ -229,8 +229,8 @@ The dispatch mechanism matters more than the transform:
   `SwitchPoint`, initially bound to the blocking version. When profiling (a
   counter in the blocking `await`, or observed contention) says
   hot-and-blocking, generate the state machine via
-  `Lookup.defineHiddenClass` and flip the call site. The JIT inlines through
-  stable call sites, so the un-flipped path costs ~nothing.
+  `Lookup.defineHiddenClass` and promote the call site. The JIT inlines through
+  stable call sites, so the un-promoted path costs ~nothing.
 - As with JIT tiering there is no on-stack replacement: threads already parked
   in a blocking await stay parked; only subsequent invocations suspend
   cooperatively. Acceptable; state it.
@@ -242,7 +242,7 @@ pre-21 JVMs, pinning-sensitive or allocation-sensitive environments, and
 runtimes (Optimus-style graph schedulers) that need their own notion of
 suspension and scheduling rather than thread semantics. (Non-JVM targets are
 *not* a differentiator: a bytecode-level transform is exactly as JVM-bound as
-Loom; Scala.js/Native would need their own IR-level equivalent either way.) **Forking is the sharpest example**: Optimus separates
+Loom; Scala.js/Native would need their own IR-level equivalent either way.) **Forking is the clearest example**: Optimus separates
 *queuing* a computation (`g$queued(...)` returns a Node immediately) from
 *awaiting* it, so several child computations can be forked before the first
 suspension — which is what makes auto-parallelism, batching, deduplication,
@@ -268,7 +268,7 @@ the capturing class's nest dynamically, so private access works with zero
 host patching (the runtime twin of the AoT path's `NestMembers` patching).
 Captured locals, including a captured `this`, are simply the impl method's
 leading parameters; the constructor handle is cached per impl method. This is
-a faithful stand-in for the eventual compiler integration, where
+an accurate stand-in for the eventual compiler integration, where
 `async { ... }` compiles to `invokedynamic` and the bootstrap receives the
 caller's `Lookup` without any cracking.
 
@@ -282,7 +282,7 @@ hidden class joins the target's nest). This is the **runtime analogue of the
 annotation-driven frontend's direct/`$queued` method pair**: the author writes
 one method calling the await markers; direct calls block (tier 0), the lifted
 handle suspends — no build-time sibling generation. A lifted handle is also
-the natural installation point for the phase-4 tier flip: today it compiles
+the natural installation point for the phase-4 tier promotion: today it compiles
 eagerly on first use; the profiling-driven variant binds a `MutableCallSite`
 to the blocking path and swaps in the transformed version when hot.
 
@@ -344,9 +344,8 @@ under `-javaagent`):
 - **Private access is same-class access** — the nestmate machinery
   (AoT `NestMembers` patching, `defineHiddenClass(NESTMATE)`) becomes
   unnecessary in this shape, including for inner-class hosts.
-- **The tier-flip skeleton exists**: the direct/lifted pair is materialized at
-  load for free; what remains for the lazy tier is only the dispatch policy
-  (a `MutableCallSite` flip or body retransformation — both legal now that
+- **The tier-promotion skeleton exists**: the direct/lifted pair is materialized at load with no extra work; what remains for the lazy tier is only the dispatch policy
+  (a `MutableCallSite` promotion or body retransformation — both legal now that
   the members exist).
 
 Not covered by the agent: stepping over a real suspension still steps out
@@ -385,7 +384,7 @@ reasons that bite the agent directly:
   suspendable and *then* graft `f$async`/`f$asyncBody` onto the loaded class.
   Adding members is legal only at first load — before you know you need them.
 
-### Design: discover by runtime witness, materialize on demand
+### Design: discover by runtime profiling, materialize on demand
 
 The chosen resolution sidesteps the static closure entirely and leans on the
 fact that **tier 0 already runs correctly**, so the closure can be *observed*
@@ -394,12 +393,12 @@ instead of computed.
 **Discovery — the blocking `await` is its own profiler.** The slow path of the
 blocking `AsyncRT.await` (the branch that is about to park a real thread) bumps
 a per-site counter and, when hot, takes one `StackWalker` sample
-(`RETAIN_CLASS_REFERENCE`). That sample **is a concrete witness of one real
+(`RETAIN_CLASS_REFERENCE`). That sample **is a concrete sample of one real
 suspension path** — `f → g → await`, with the *actual dispatched* callees, not
 static types. Virtual dispatch thus resolves itself: you elevate against the
 target that really ran, never reasoning about the override graph or the open
-world. The suspendable set `S` grows only by witnessed evidence; nothing in it
-is speculative. Counter and witness come from one site.
+world. The suspendable set `S` grows only by sampled evidence; nothing in it
+is speculative. Counter and sample come from one site.
 
 **Materialization — on-demand hidden-class siblings.** Indirectly-blocking
 methods get *nothing* at load (no bloat — the cost model stays "pay only where
@@ -417,12 +416,12 @@ profiling says it matters"). At elevation time, per method:
 
 **Dispatch — the edge goes through `invokedynamic`.** Hidden classes are not
 nameable in a constant pool, so a caller cannot `invoke f$async` directly. The
-caller→callee *edge* is flipped by **retransforming the caller's body** (legal:
+caller→callee *edge* is promoted by **retransforming the caller's body** (legal:
 body replacement only) so the `invoke f` becomes an indy site whose bootstrap
 returns the `MethodHandle` to `f`'s hidden entry, awaited, backed by a
-`MutableCallSite`. The call site can therefore also be flipped **back** to
+`MutableCallSite`. The call site can therefore also be promoted **back** to
 blocking when a path goes cold — de-elevation, which a hard-coded retransform
-would forfeit. This is precisely §7's tier-flip mechanism; the two design
+would forfeit. This is precisely §7's tier-promotion mechanism; the two design
 choices converge on it.
 
 Net: the retransform restriction is dodged from both sides — **bodies are
@@ -446,7 +445,7 @@ Async.async { ... }          ← async boundary: already transformed; has its in
         g   (direct awaiter: already has g$async in-host from load time)
         │
         ▼
-      await(leaf)            ← blocking-await slow path fires; live stack IS the witness
+      await(leaf)            ← blocking-await slow path fires; live stack IS the profiler
 ```
 
 **Elevation is only useful contiguously from the await up to an async
@@ -454,9 +453,9 @@ boundary.** Suspending `f` while `e` still blocks merely moves the park up one
 frame. So the unit of elevation is the *run of frames between a boundary and a
 hot await*, and the boundary (`Async.async`/`lift`, or an actor/workflow
 scheduler entry) is the natural top: it already exists because the user opted
-in there, and already carries its in-host pair. The witnessed stack always
+in there, and already carries its in-host pair. The sampled stack always
 bottoms at such a boundary, so propagation terminates on its own. **Granularity
-decision: flip the whole witnessed chain on first hot observation** — the
+decision: promote the whole sampled chain on first hot observation** — the
 boundary bounds it, so there is nothing to ratchet toward.
 
 **The entry ABI is a firewall against re-derivation cascades.** Once `f` calls
@@ -503,13 +502,13 @@ overridden interface default sound — the very case the direct rewrite had to
 refuse. The blocking original is preserved byte-identical, re-entry is
 idempotent, and callers this transform cannot rewrite are quietly left on the
 blocking tier. What remains is the *runtime* half — discovering
-*which* indirect methods are worth elevating (the `StackWalker` witness), the
-cross-class closure with on-demand hidden siblings, and the indy edge flip.
+*which* indirect methods are worth elevating (the `StackWalker` sample), the
+cross-class closure with on-demand hidden siblings, and the indy edge promotion.
 
 This is userland Loom's tiering done by observation: tier 0 runs and blocks;
 the blocking await profiles itself; hot blocking stacks are elevated frame by
 frame up to the boundary, with virtual dispatch and the open world handled for
-free because every elevation is backed by a witnessed execution.
+free because every elevation is backed by a sampled execution.
 
 ## 7.8 Elevating through virtual dispatch (Strategy B — implemented)
 
@@ -552,10 +551,10 @@ Verified by `ElevateDispatchTest`: an overridden interface default and an
 overridable virtual call both elevate and agree with the blocking tier (`Impl`
 → 60; `OverridingImpl` runs its override → 9990).
 
-## 7.9 The witness-driven tier flip (StackWalker — implemented)
+## 7.9 The profile-driven tier promotion (StackWalker — implemented)
 
-§7.7 described electing *when* to elevate from a runtime witness rather than
-elevating everything reachable from an `await` ahead of time. That witness now
+§7.7 described electing *when* to elevate from a runtime profiler rather than
+elevating everything reachable from an `await` ahead of time. That sampling now
 exists and drives the Strategy-B call site.
 
 - **The blocking await profiles itself** (`async3.runtime.Profiler`,
@@ -566,39 +565,39 @@ exists and drives the Strategy-B call site.
   elevation boundary (the first runtime/reflection/generated frame below them) —
   the direct awaiter *and every blocking caller it reaches through*, each keyed
   `class.name+descriptor`. Counting the whole chain (not just the leaf) is what
-  makes a deeper caller go hot and flip its own call site too — **chain
+  makes a deeper caller go hot and promote its own call site too — **chain
   elevation**. Crossing a threshold marks a method *hot*; the walk happens only
   on the slow path, where it is cheap next to the block it precedes.
 
-- **The call site starts blocking and flips when hot.** Each per-receiver
+- **The call site starts blocking and promotes when hot.** Each per-receiver
   `Site` in `Elevation` begins on the **blocking tier**: it simply invokes the
   real `g` (whose own awaits block), so the state-machine cost is deferred. On
-  each call it consults `Profiler.isHot`; once the witness has seen `g` block
-  enough, the `Site` flips to the suspending transform on its next call. The two
-  tiers are result-equivalent — flipping only changes whether a not-yet-complete
+  each call it consults `Profiler.isHot`; once the profiler has seen `g` block
+  enough, the `Site` promotes to the suspending transform on its next call. The two
+  tiers are result-equivalent — promoting only changes whether a not-yet-complete
   await parks the carrier or releases it.
 
 - **Suspension goes as deep as the chain.** A state machine materialized at
   runtime is built with `transformMethodElevated`, which elevates the method's
   *own* virtually dispatched suspendable calls to per-receiver call sites too. So
-  when `mid`'s site flips, the `mid` state machine doesn't block on `leaf` — it
-  suspends through a fresh `leaf` call site, which flips when `leaf` is hot. Each
+  when `mid`'s site promotes, the `mid` state machine doesn't block on `leaf` — it
+  suspends through a fresh `leaf` call site, which promotes when `leaf` is hot. Each
   level resolves and transforms the next on demand; the chain comes off the
-  thread one site at a time as the witness marks each level hot.
+  thread one site at a time as the profiler marks each level hot.
 
 This is the userland-Loom tiering of §7.7, scoped to the call site rather than a
-global `MutableCallSite`. Because the witness counts the actual blocking chain
+global `MutableCallSite`. Because the profiler counts the actual blocking chain
 and `Elevation` resolves per actual receiver, the two compose: the frames that
 really block are the frames that get state machines. No on-stack replacement — a
 call already parked stays parked; only subsequent calls suspend (stated, as in
 JIT tiering). Verified by `DynamicElevationTest` (one level: `N` blocking calls
-witness `leaf` hot, then the next call suspends instead of parking) and
-`ChainElevationTest` (three levels `top → mid → leaf`: the witness makes both
-`mid` and `leaf` hot, both sites flip on the next call, and it suspends through
+sample `leaf` hot, then the next call suspends instead of parking) and
+`ChainElevationTest` (three levels `top → mid → leaf`: the profiler makes both
+`mid` and `leaf` hot, both sites promote on the next call, and it suspends through
 the whole chain to the same answer).
 
 What remains of §7.7's full vision: **de-elevation** when a path cools (the
-`Site` flip is one-way today); applying the same blocking-start flip to the
+`Site` promotion is one-way today); applying the same blocking-start promotion to the
 **statically bound** (`g$async`) path, which would need an indy there too (it is
 still eager); and, for the agent, `Can-Retransform-Classes` to rewrite
 *already-loaded* caller bodies rather than relying on the caller having been
@@ -651,12 +650,12 @@ deliberately not used, to keep iteration friction low.
   (`m$asyncBody` sibling + `m$async` entry + shared `DelegatingStateMachine`
   shell), preferred automatically by `async`/`lift`, JDI-verified debugging
   with no shadow naming. Retires the shadow/nestmate workarounds wherever the
-  agent is present and stands up the member layout the lazy tier flip needs. Includes
+  agent is present and stands up the member layout the lazy tier promotion needs. Includes
   `Async.lift(C::m)` — runtime derivation of the suspending variant of an
   existing method (the runtime method-pair), covering static/unbound/bound/
   private references.
 - **Phase 4 — lazy variant + numbers.** `defineHiddenClass` +
-  `MutableCallSite` flip; JMH: blocking vs. AoT-transformed vs. lazily flipped
+  `MutableCallSite` promotion; JMH: blocking vs. AoT-transformed vs. lazily promoted
   vs. the current compiler phase's output; generic frame vs. typed fields.
 - **Phase 4.5 — elevate the blocking tier (§7.7).** ✅ *static in-class slice*:
   `transformInPlace` computes the same-class suspendability closure (a method is
@@ -672,17 +671,17 @@ deliberately not used, to keep iteration friction low.
   class. Tested in `ElevateTest` (primitive/object/void coercions, multi-level,
   mixed direct+indirect, fast path vs. real suspension) and `ElevateDispatchTest`
   (interface-default and overridable-virtual calls elevate and agree with the
-  blocking tier, per actual receiver). ✅ *witness-driven tier flip* (§7.9): the
+  blocking tier, per actual receiver). ✅ *profile-driven tier promotion* (§7.9): the
   blocking `AsyncRT.await` profiles itself with a `StackWalker` sample
-  (`async3.runtime.Profiler`); the Strategy-B call site starts blocking and flips
-  to the suspending transform once the awaiting method is witnessed hot, verified
-  by `DynamicElevationTest`, and *chain elevation* (§7.9): the witness counts the
-  whole contiguous blocking chain so deeper callers flip too, and runtime state
+  (`async3.runtime.Profiler`); the Strategy-B call site starts blocking and promotes
+  to the suspending transform once the awaiting method is sampled hot, verified
+  by `DynamicElevationTest`, and *chain elevation* (§7.9): the profiler counts the
+  whole contiguous blocking chain so deeper callers promote too, and runtime state
   machines are built with `transformMethodElevated` so suspension recurses through
   per-receiver call sites — `ChainElevationTest` suspends a three-level
   `top → mid → leaf` chain end to end.
-  *Remaining:* de-elevation when a path cools (the flip is one-way today); the
-  same blocking-start flip on the statically bound `g$async` path (needs an indy
+  *Remaining:* de-elevation when a path cools (the promotion is one-way today); the
+  same blocking-start promotion on the statically bound `g$async` path (needs an indy
   there too); cross-class static closure; and on the agent,
   `Can-Retransform-Classes` for caller-body rewrites.
 - **Phase 5 — integration sketch only.** Post-`jvm` hook in `GenBCode` (where

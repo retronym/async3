@@ -307,7 +307,7 @@ h2{font-family:var(--serif);font-style:italic;font-weight:400;font-size:clamp(30
 .frame.boundary{border-style:dashed}
 .chain .dn{color:var(--faint);font-size:11px;letter-spacing:.1em;padding:8px 0}
 
-/* elevation — lazy tier-flip machine */
+/* elevation — tier-promotion machine */
 .elevm{margin-top:18px}
 .elevm .describe::before{content:"tier ▸ ";color:var(--faint);font-style:normal}
 .elevbody{display:grid;grid-template-columns:1.45fr .9fr;min-height:430px}
@@ -397,7 +397,7 @@ footer .links a{margin:0 14px}
     <a href="#split">split</a>
     <a href="#machine">transform</a>
     <a href="#tiers">deploy</a>
-    <a href="#elevate">seam</a>
+    <a href="#elevate">meet</a>
     <a href="#compare">vs</a>
     <a href="https://github.com/retronym/async3">github</a>
   </span>
@@ -425,7 +425,7 @@ footer .links a{margin:0 14px}
   into a re-entrant state machine — a pure bytecode rewrite that knows nothing about deployment.
   <b style="color:var(--amber)">② Deployment</b> decides <i>when</i> it runs, <i>where</i> the output
   lives, and <i>how</i> a caller reaches the suspending variant — ahead of time, at class load, or
-  lazily when a path runs hot. They meet at one <b style="color:var(--teal)">seam</b>: the transform
+  lazily when a path runs hot. They meet in one <b style="color:var(--teal)">place</b>: the transform
   <i>rewires calls</i> — a call to something that itself suspends becomes a suspension point — and the
   shape of that edge (a sibling method, or a runtime call site) is the one transform choice forced by
   deployment. Everything below is one of those three.</p>
@@ -443,7 +443,7 @@ footer .links a{margin:0 14px}
   <div class="machine">
     <div class="machine-head">
       <span class="dots"><i></i><i></i><i></i></span>
-      <span class="title">Samples.<b>sumTwice</b>(fa, fb) — transformed by <b>AsyncTransformer</b>, replayed faithfully</span>
+      <span class="title">Samples.<b>sumTwice</b>(fa, fb) — transformed by <b>AsyncTransformer</b>, replayed exactly</span>
     </div>
     <div class="cols">
       <div class="col">
@@ -587,15 +587,15 @@ CompletableFuture&lt;Integer&gt; s = Async.<span style="color:var(--amber)">asyn
 </section>
 
 <section id="elevate">
-  <div class="sec-label">05 · the seam · transform ⋈ deployment</div>
+  <div class="sec-label">05 · where they meet · transform ⋈ deployment</div>
   <h2>When the blocking is one call away.</h2>
   <p class="lede">Here the two concerns touch. The transform finds <code>await</code> markers — but a
   method can block <b>without one</b>, by <i>calling</i> a method that awaits. <code>indirect</code>
   below has no <code>await</code> of its own, yet it blocks on <code>leaf</code>. So the transform
   <b>rewires the call into a suspension point</b>: <code>g(…)</code> → <code>await(g$async(…))</code>.
-  The <i>shape</i> of that rewired edge is the seam — a direct sibling call when dispatch is static
+  The <i>shape</i> of that rewired edge is what couples them — a direct sibling call when dispatch is static
   (deployment must have materialized <code>g$async</code>), or a runtime call site when it's virtual
-  (deployment resolves it per receiver, and the witness flips it when hot). The three panels below
+  (deployment resolves it per receiver, and the profiler promotes it when hot). The three panels below
   walk those three edge shapes.</p>
 
   <div class="elev">
@@ -620,13 +620,13 @@ bipush 10; imul              <span class="cm">// …the original * 10</span></pr
   <b>starts blocking</b>, and the blocking <code>AsyncRT.await</code> <b>profiles itself</b>: when a future isn't ready,
   it takes a <code>StackWalker</code> sample, blames the awaiting method, and counts it
   (<a href="https://github.com/retronym/async3/blob/main/src/main/java/async3/runtime/Profiler.java"><code>Profiler</code></a>).
-  Cross the threshold and the call site <b>flips to suspending</b> on its next call. This is exactly
+  Cross the threshold and the call site <b>promotes to suspending</b> on its next call. This is exactly
   <code>DynamicElevationTest</code> — step through it:</p>
 
   <div class="machine elevm">
     <div class="machine-head">
       <span class="dots"><i></i><i></i><i></i></span>
-      <span class="title">witness-driven tier flip — <b>indirect$async → invokedynamic leaf → leaf → await(f)</b>, threshold 3</span>
+      <span class="title">profile-driven tier promotion — <b>indirect$async → invokedynamic leaf → leaf → await(f)</b>, threshold 3</span>
     </div>
     <div class="elevbody">
       <div class="chain2" id="chain2">
@@ -702,10 +702,10 @@ bipush 10; imul              <span class="cm">// …the original * 10</span></pr
   (completes synchronously), while an awaiting body really suspends — each running its <b>own</b> <code>leaf</code>.
   The blocking original is left <b>byte-identical</b> and the elevated result matches it exactly —
   <b>verified blocking ≡ elevated</b>, per receiver. The static within-class rewrite, this call-site
-  dispatch, <b>and the witness-driven flip in the machine above</b> (the <code>StackWalker</code> profiler,
+  dispatch, <b>and the profile-driven promotion in the machine above</b> (the <code>StackWalker</code> profiler,
   blocking→suspending on hotness) are all <b>implemented and tested</b> — see <code>DynamicElevationTest</code>.
-  What's still on the design doc: flipping the <i>whole</i> witnessed chain to the async boundary (today one
-  frame flips and suspension rides up through the already-elevated caller), and de-elevation when a path cools
+  What's still on the design doc: promoting the <i>whole</i> sampled chain to the async boundary (today one
+  frame promotes and suspension rides up through the already-elevated caller), and de-elevation when a path cools
   (<a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">§7.7</a>–<a href="https://github.com/retronym/async3/blob/main/docs/DESIGN.md">§7.9</a>).</p>
 </section>
 
@@ -884,7 +884,7 @@ new IntersectionObserver(es=>{
 </script>
 
 <script>
-/* ---------- the elevation (lazy tier-flip) machine ---------- */
+/* ---------- the elevation (tier-promotion) machine ---------- */
 (function(){
   const $=id=>document.getElementById(id);
   const KEYS=["i","s","l","a"];
@@ -920,26 +920,26 @@ new IntersectionObserver(es=>{
    {name:"call #3 — threshold hit, leaf marked HOT",cls:{i:"elv",s:"blk",l:"hot",a:"hot"},flip:[],
     tier:"0",amber:false,tnote:"blocking · leaf now HOT",count:3,pct:100,phot:true,cnote:"threshold 3 reached",
     thr:"blocked",thrText:"BLOCKED in join()",wit:true,
-    desc:"the third block reaches the threshold → Profiler marks leaf HOT. This call still blocked; the flip lands on the next one (no on-stack replacement).",
+    desc:"the third block reaches the threshold → Profiler marks leaf HOT. This call still blocked; the promotion lands on the next call (no on-stack replacement).",
     log:"<b>call #3</b> ▸ leaf count = 3 ≥ threshold → <span class='ok'>leaf is HOT</span> · this call already ran blocking"},
 
-   {name:"call #4 — the Site flips to suspending",cls:{i:"elv",s:"elv",l:"elv",a:"elv"},flip:["s","l","a"],
+   {name:"call #4 — the Site promotes to suspending",cls:{i:"elv",s:"elv",l:"elv",a:"elv"},flip:["s","l","a"],
     tier:"1",amber:true,tnote:"suspending — state machine",count:3,pct:100,phot:false,cnote:"hot",
     thr:"released",thrText:"RELEASED",wit:false,
     desc:"Site[leaf] sees HOT → defineHiddenClass(leaf state machine) and invokes it. leaf parks on f and returns an incomplete future — worker-1 is handed back.",
-    log:"<b>call #4</b> ▸ Site flips → transforms leaf → leaf.start(): await(f) not done → spill + onComplete → <b>incomplete future</b>, <span class='ok'>worker-1 released</span>"},
+    log:"<b>call #4</b> ▸ Site promotes → transforms leaf → leaf.start(): await(f) not done → spill + onComplete → <b>incomplete future</b>, <span class='ok'>worker-1 released</span>"},
 
    {name:"the whole chain comes off the thread",cls:{i:"elv",s:"elv",l:"elv",a:"elv"},flip:[],
     tier:"1",amber:true,tnote:"suspending — state machine",count:3,pct:100,phot:false,cnote:"hot",
     thr:"released",thrText:"RELEASED — free for other work",wit:false,
-    desc:"indirect$async was already a state machine (static elevation); it awaits leaf's incomplete future and suspends too. One flip, the whole chain is off the carrier.",
-    log:"<b>indirect$async</b> ▸ awaits leaf's future → suspends · <span class='ok'>nothing holds worker-1</span> — the static caller carries the flip upward for free"},
+    desc:"indirect$async was already a state machine (static elevation); it awaits leaf's incomplete future and suspends too. One promotion, the whole chain is off the carrier.",
+    log:"<b>indirect$async</b> ▸ awaits leaf's future → suspends · <span class='ok'>nothing holds worker-1</span> — the static caller carries the promotion upward at no cost"},
 
    {name:"f completes → resume → 60",cls:{i:"elv",s:"elv",l:"elv",a:"elv"},flip:[],
     tier:"1",amber:true,tnote:"suspending — state machine",count:3,pct:100,phot:false,cnote:"hot",
     thr:"running",thrText:"resuming",wit:false,
     desc:"when f completes, leaf resumes → 6 → its future completes → indirect resumes → 60. The same answer tier 0 gave, no thread held across the await.",
-    log:"<b>f.complete(5)</b> ▸ leaf resumes → 6 → indirect resumes → <span class='ok'>60</span> — identical result, the flip only changed who held the thread"}
+    log:"<b>f.complete(5)</b> ▸ leaf resumes → 6 → indirect resumes → <span class='ok'>60</span> — identical result, the promotion only changed who held the thread"}
   ];
 
   $("estepDots").innerHTML=S.map((s,i)=>`<i data-i="${i}" title="${s.name}"></i>`).join("");
